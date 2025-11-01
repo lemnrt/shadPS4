@@ -1,4 +1,5 @@
-// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+
+// SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <thread>
@@ -35,6 +36,7 @@
 #include <common/singleton.h>
 #include <core/libraries/network/net_error.h>
 #include <core/libraries/network/sockets.h>
+#include <core/linker.h>
 #include "aio.h"
 
 namespace Libraries::Kernel {
@@ -46,6 +48,8 @@ static std::mutex m_asio_req;
 static std::condition_variable_any cv_asio_req;
 static std::atomic<u32> asio_requests;
 static std::jthread service_thread;
+
+Core::EntryParams entry_params{};
 
 void KernelSignalRequest() {
     std::unique_lock lock{m_asio_req};
@@ -245,6 +249,24 @@ s32 PS4_SYSV_ABI sceKernelGetSystemSwVersion(SwVersionStruct* ret) {
     return ORBIS_OK;
 }
 
+s32 PS4_SYSV_ABI getargc() {
+    return entry_params.argc;
+}
+
+const char** PS4_SYSV_ABI getargv() {
+    return entry_params.argv;
+}
+
+s32 PS4_SYSV_ABI get_authinfo(u64 tid, AuthInfoData* p2) {
+    LOG_WARNING(Lib_Kernel, "(STUBBED) called, pid: {:#x}", tid);
+    if (g_curthread->tid != tid) {
+        *Kernel::__Error() = POSIX_ESRCH;
+        return -1;
+    }
+    p2->caps[0] = 0x2000000000000000;
+    return ORBIS_OK;
+}
+
 void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     service_thread = std::jthread{KernelServiceThread};
 
@@ -262,6 +284,7 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LIB_OBJ("f7uOxY9mM1U", "libkernel", 1, "libkernel", &g_stack_chk_guard);
     LIB_FUNCTION("D4yla3vx4tY", "libkernel", 1, "libkernel", sceKernelError);
     LIB_FUNCTION("Mv1zUObHvXI", "libkernel", 1, "libkernel", sceKernelGetSystemSwVersion);
+    LIB_FUNCTION("igMefp4SAv0", "libkernel", 1, "libkernel", get_authinfo);
     LIB_FUNCTION("PfccT7qURYE", "libkernel", 1, "libkernel", kernel_ioctl);
     LIB_FUNCTION("wW+k21cmbwQ", "libkernel", 1, "libkernel", kernel_ioctl);
     LIB_FUNCTION("JGfTMBOdUJo", "libkernel", 1, "libkernel", sceKernelGetFsSandboxRandomWord);
@@ -315,6 +338,8 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
 
     LIB_FUNCTION("4oXYe9Xmk0Q", "libkernel", 1, "libkernel", sceKernelGetGPI);
     LIB_FUNCTION("ca7v6Cxulzs", "libkernel", 1, "libkernel", sceKernelSetGPO);
+    LIB_FUNCTION("iKJMWrAumPE", "libkernel", 1, "libkernel", getargc);
+    LIB_FUNCTION("FJmglmTMdr4", "libkernel", 1, "libkernel", getargv);
 }
 
 } // namespace Libraries::Kernel
