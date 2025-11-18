@@ -88,6 +88,10 @@ public:
     void SavePresets(const QList<QString>& list);
     QList<QString> LoadFavorites() const;
     void SaveFavorites(const QList<QString>& list);
+    QList<int> LoadHiddenColumns() const;
+    void SaveHiddenColumns(const QList<int>& hiddenColumns);
+    int LoadDisplayMode() const;
+    void SaveDisplayMode(int mode);
     std::string GetShadPath() const {
 
         if (m_shadPath.empty()) {
@@ -106,6 +110,15 @@ public:
         settings.setValue("ShadPath", QString::fromStdString(path));
         settings.sync();
     }
+    QList<int> LoadDockWidgetSizes();
+    void SaveDockWidgetSizes(const QList<int>& sizes);
+
+    bool LoadShowLogSetting() const;
+    void SaveShowLogSetting(bool show);
+
+    void SetSkipWelcome(bool skip);
+
+    bool GetSkipWelcome() const;
 
     std::string GetSelectedShadExePath() const {
         if (m_selectedShadExePath.empty()) {

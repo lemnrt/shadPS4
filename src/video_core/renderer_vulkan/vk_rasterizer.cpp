@@ -260,12 +260,12 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
 
     const auto& [buffer, base] =
-        buffer_cache.ObtainBuffer(arg_address + offset, stride * max_count, false);
+        buffer_cache.ObtainBuffer(arg_address + offset, stride * max_count);
 
-    const VideoCore::Buffer* count_buffer{};
+    VideoCore::Buffer* count_buffer{};
     u32 count_base{};
     if (count_address != 0) {
-        std::tie(count_buffer, count_base) = buffer_cache.ObtainBuffer(count_address, 4, false);
+        std::tie(count_buffer, count_base) = buffer_cache.ObtainBuffer(count_address, 4);
     }
 
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
@@ -342,14 +342,15 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
         return;
     }
 
-    const auto [buffer, base] = buffer_cache.ObtainBuffer(address + offset, size, true);
-    buffer_cache.GetPendingGpuModifiedRanges().Subtract(address + offset, size);
-
     if (!BindResources(pipeline)) {
         return;
     }
 
+    const auto [buffer, base] =
+        buffer_cache.ObtainBuffer(address + offset, size, VideoCore::ObtainBufferFlags::IsWritten);
+    buffer_cache.GetPendingGpuModifiedRanges().Subtract(address + offset, size);
     scheduler.EndRendering();
+
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
 
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -376,9 +377,14 @@ void Rasterizer::OnSubmit() {
         buffer_cache.ProcessFaultBuffer();
     }
     texture_cache.ProcessDownloadImages();
-    texture_cache.RunGarbageCollector();
     buffer_cache.ProcessPreemptiveDownloads();
-    buffer_cache.RunGarbageCollector();
+
+    const u64 used_mem = instance.GetDeviceMemoryUsage();
+    const u64 trigger = texture_cache.GetTriggerGcMemory();
+    if (used_mem > trigger) {
+        texture_cache.RunGarbageCollectorAsync();
+        buffer_cache.RunGarbageCollectorAsync();
+    }
 }
 
 void Rasterizer::CommitPendingGpuRanges() {
@@ -386,7 +392,8 @@ void Rasterizer::CommitPendingGpuRanges() {
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
-    if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline)) {
+    if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
+        IsComputeImageClear(pipeline)) {
         return false;
     }
 
@@ -412,10 +419,14 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
 
     if (uses_dma) {
         // We only use fault buffer for DMA right now.
-        Common::RecursiveSharedLock lock{mapped_ranges_mutex};
-        for (auto& range : mapped_ranges) {
-            buffer_cache.SynchronizeBuffersInRange(range.lower(), range.upper() - range.lower());
+        {
+            Common::RecursiveSharedLock lock{mapped_ranges_mutex};
+            for (auto& range : mapped_ranges) {
+                buffer_cache.SynchronizeBuffersInRange(range.lower(),
+                                                       range.upper() - range.lower());
+            }
         }
+        buffer_cache.MemoryBarrier();
     }
 
     fault_process_pending |= uses_dma;
@@ -522,6 +533,66 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     return true;
 }
 
+bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
+    if (!pipeline->IsCompute()) {
+        return false;
+    }
+
+    // Ensure shader only has 2 bound buffers
+    const auto& cs_pgm = liverpool->GetCsRegs();
+    const auto& info = pipeline->GetStage(Shader::LogicalStage::Compute);
+    if (cs_pgm.num_thread_x.full != 64 || info.buffers.size() != 2 || !info.images.empty()) {
+        return false;
+    }
+
+    // From those 2 buffers, first must hold the clear vector and second the image being cleared
+    const auto& desc0 = info.buffers[0];
+    const auto& desc1 = info.buffers[1];
+    if (desc0.is_formatted || !desc1.is_formatted || desc0.is_written || !desc1.is_written) {
+        return false;
+    }
+
+    // First buffer must have size of vec4 and second the size of a single layer
+    const AmdGpu::Buffer buf0 = desc0.GetSharp(info);
+    const AmdGpu::Buffer buf1 = desc1.GetSharp(info);
+    const u32 buf1_bpp = AmdGpu::NumBitsPerBlock(buf1.GetDataFmt());
+    if (buf0.GetSize() != 16 || (cs_pgm.dim_x * 128ULL * (buf1_bpp / 8)) != buf1.GetSize()) {
+        return false;
+    }
+
+    // Find image the buffer alias
+    const auto image1_id =
+        texture_cache.FindImageFromRange(buf1.base_address, buf1.GetSize(), false);
+    if (!image1_id) {
+        return false;
+    }
+
+    // Image clear must be valid
+    VideoCore::Image& image1 = texture_cache.GetImage(image1_id);
+    if (image1.info.guest_size != buf1.GetSize() || image1.info.num_bits != buf1_bpp ||
+        image1.info.props.is_depth) {
+        return false;
+    }
+
+    // Perform image clear
+    const float* values = reinterpret_cast<float*>(buf0.base_address);
+    const vk::ClearValue clear = {
+        .color = {.float32 = std::array<float, 4>{values[0], values[1], values[2], values[3]}},
+    };
+    const VideoCore::SubresourceRange range = {
+        .base =
+            {
+                .level = 0,
+                .layer = 0,
+            },
+        .extent = image1.info.resources,
+    };
+    image1.Clear(clear, range);
+    image1.flags |= VideoCore::ImageFlagBits::GpuModified;
+    image1.flags &= ~VideoCore::ImageFlagBits::Dirty;
+    return true;
+}
+
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     buffer_bindings.clear();
@@ -575,11 +646,19 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 buffer_infos.emplace_back(null_buffer.Handle(), 0, VK_WHOLE_SIZE);
             }
         } else {
-            const auto [vk_buffer, offset] = buffer_cache.ObtainBuffer(
-                vsharp.base_address, size, desc.is_written, desc.is_formatted, buffer_id);
+            VideoCore::ObtainBufferFlags flags = {};
+            if (desc.is_written) {
+                flags |= VideoCore::ObtainBufferFlags::IsWritten;
+            }
+            if (desc.is_formatted) {
+                flags |= VideoCore::ObtainBufferFlags::IsTexelBuffer;
+            }
+            const auto [vk_buffer, offset] =
+                buffer_cache.ObtainBuffer(vsharp.base_address, size, flags, buffer_id);
             const u32 offset_aligned = Common::AlignDown(offset, alignment);
-            const u32 adjust = offset - offset_aligned;
-            ASSERT(adjust % 4 == 0);
+            u32 adjust = offset - offset_aligned;
+            while (adjust % 4 == 0)
+                adjust++;
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
             if (auto barrier =
@@ -942,7 +1021,7 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
     }
-    buffer_cache.InvalidateMemory(addr, size);
+    buffer_cache.InvalidateMemory(addr, size, true);
     texture_cache.InvalidateMemory(addr, size);
     return true;
 }
@@ -976,7 +1055,7 @@ void Rasterizer::MapMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
-    buffer_cache.InvalidateMemory(addr, size);
+    buffer_cache.InvalidateMemory(addr, size, true);
     texture_cache.UnmapMemory(addr, size);
     page_manager.OnGpuUnmap(addr, size);
     {

@@ -129,6 +129,9 @@ static ConfigEntry<string> userName("shadPS4");
 static std::string chooseHomeTab = "General";
 static ConfigEntry<bool> isShowSplash(false);
 static bool isAutoUpdate = false;
+static ConfigEntry<bool> pauseOnUnfocus(false);
+static bool showWelcomeDialog = true;
+static ConfigEntry<bool> disable_hardcoded_hotkeys(false);
 static bool isAlwaysShowChangelog = false;
 static ConfigEntry<std::string> isSideTrophy("right");
 static ConfigEntry<bool> isConnectedToNetwork(false);
@@ -269,6 +272,21 @@ u32 m_language = 1; // english
 
 // Keys
 static std::string trophyKey = "";
+
+bool getShowWelcomeDialog() {
+    return showWelcomeDialog;
+}
+
+void setShowWelcomeDialog(bool enable) {
+    showWelcomeDialog = enable;
+}
+
+bool getPauseOnUnfocus() {
+    return pauseOnUnfocus.get();
+}
+void setPauseOnUnfocus(bool enable) {
+    pauseOnUnfocus.base_value = enable;
+}
 
 bool vkValidationCoreEnabled() {
     return vkValidationCore.get();
@@ -624,6 +642,14 @@ std::string sideTrophy() {
     return isSideTrophy.get();
 }
 
+bool DisableHardcodedHotkeys() {
+    return disable_hardcoded_hotkeys.get();
+}
+
+void setDisableHardcodedHotkeys(bool disable) {
+    disable_hardcoded_hotkeys.base_value = disable;
+}
+
 bool nullGpu() {
     return isNullGpu.get();
 }
@@ -638,6 +664,7 @@ ReadbackSpeed readbackSpeed() {
 
 void setReadbackSpeed(ReadbackSpeed mode) {
     readbackSpeedMode.base_value = mode;
+    readbackSpeedMode.game_specific_value = mode;
 }
 
 bool setReadbackLinearImages(bool enable) {
@@ -1260,7 +1287,11 @@ void load(const std::filesystem::path& path, bool is_game_specific) {
         }
         isShowSplash.setFromToml(general, "showSplash", is_game_specific);
         isAutoUpdate = toml::find_or<bool>(general, "autoUpdate", false);
+        pauseOnUnfocus.setFromToml(general, "pauseOnUnfocus", is_game_specific);
+        showWelcomeDialog = toml::find_or<bool>(general, "showWelcomeDialog", true);
+
         isAlwaysShowChangelog = toml::find_or<bool>(general, "alwaysShowChangelog", false);
+        disable_hardcoded_hotkeys.setFromToml(general, "DisableHardcodedHotkeys", is_game_specific);
         isSideTrophy.setFromToml(general, "sideTrophy", is_game_specific);
         compatibilityData = toml::find_or<bool>(general, "compatibilityEnabled", false);
         checkCompatibilityOnStartup =
@@ -1533,7 +1564,10 @@ void save(const std::filesystem::path& path) {
     data["General"]["chooseHomeTab"] = chooseHomeTab;
     data["General"]["showSplash"] = isShowSplash.base_value;
     data["General"]["autoUpdate"] = isAutoUpdate;
+    data["General"]["pauseOnUnfocus"] = pauseOnUnfocus.base_value;
+    data["General"]["showWelcomeDialog"] = showWelcomeDialog;
     data["General"]["alwaysShowChangelog"] = isAlwaysShowChangelog;
+    data["General"]["DisableHardcodedHotkeys"] = disable_hardcoded_hotkeys.base_value;
     data["General"]["enableAutoBackup"] = enableAutoBackup.base_value;
     data["General"]["autoRestartGame"] = autoRestartGame;
     data["General"]["restartWithBaseGame"] = restartWithBaseGame;
@@ -1711,6 +1745,7 @@ void setDefaultValues() {
     // General
     isNeo = false;
     isDevKit = false;
+    showWelcomeDialog = true;
     extraDmemInMbytes = 0;
     isPSNSignedIn = false;
     isTrophyPopupDisabled = false;
@@ -1719,6 +1754,7 @@ void setDefaultValues() {
     playBGM = false;
     BGMvolume = 50;
     enableDiscordRPC = true;
+    disable_hardcoded_hotkeys = false;
     logFilter = "";
     logType = "sync";
     userName = "shadPS4";
@@ -1754,6 +1790,7 @@ void setDefaultValues() {
     isShaderDebug = false;
     isShowSplash = false;
     isAutoUpdate = false;
+    pauseOnUnfocus = false;
     isAlwaysShowChangelog = false;
     windowWidth = 1280;
     windowHeight = 720;

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "layer.h"
@@ -6,6 +6,7 @@
 #include <chrono>
 #include <fstream>
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_video.h>
 #include <emulator.h>
 
 #include <SDL3/SDL.h>
@@ -15,6 +16,7 @@
 #ifdef ENABLE_QT_GUI
 #include "qt_gui/main_window.h"
 #endif
+#include "common/memory_patcher.h"
 
 #include "common/config.h"
 #include "common/singleton.h"
@@ -26,6 +28,8 @@
 #include "imgui_internal.h"
 #include "input/input_handler.h"
 #include "options.h"
+#include "sdl_window.h"
+
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "widget/frame_dump.h"
 #include "widget/frame_graph.h"
@@ -34,6 +38,8 @@
 #include "widget/shader_list.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
+extern Frontend::WindowSDL* g_window;
+
 using Btn = Libraries::Pad::OrbisPadButtonDataOffset;
 
 std::string current_filter = Config::getLogFilter();
@@ -59,6 +65,8 @@ static bool fullscreen_tip_manual = false;
 static bool show_fullscreen_tip = true;
 static float fullscreen_tip_timer = 10.0f;
 static float hotkeys_tip_timer = 10.0f;
+static int quit_menu_selection = 0;
+static bool showTrophyViewer = false;
 
 namespace Overlay {
 
@@ -66,9 +74,22 @@ void ToggleSimpleFps() {
     show_simple_fps = !show_simple_fps;
     visibility_toggled = true;
 }
-
 void ToggleQuitWindow() {
+
     show_quit_window = !show_quit_window;
+
+    if (show_quit_window) {
+        quit_menu_selection = 0;
+
+        if (!DebugState.IsGuestThreadsPaused()) {
+            DebugState.PauseGuestThreads();
+        }
+
+    } else {
+        if (DebugState.IsGuestThreadsPaused()) {
+            DebugState.ResumeGuestThreads();
+        }
+    }
 }
 
 void TogglePauseWindow() {
@@ -99,6 +120,15 @@ static std::string help_text =
 #include "help.txt"
     ;
 // clang-format on
+
+void L::TextCentered(const std::string& text) {
+    ImVec2 textSize = ImGui::CalcTextSize(text.c_str());
+    float windowWidth = ImGui::GetWindowSize().x;
+    float cursorX = (windowWidth - textSize.x) * 0.5f;
+
+    ImGui::SetCursorPosX(cursorX);
+    ImGui::TextUnformatted(text.c_str());
+}
 
 void L::DrawMenuBar() {
     const auto& ctx = *GImGui;
@@ -435,7 +465,8 @@ void DrawFullscreenHotkeysWindow(bool& is_open) {
                                 {"Developer Tools", "Ctrl+F10 or Share/Back+Circle/B"},
                                 {"Show FPS", "F10 or Share/Back+L2"},
                                 {"ShowCurrentSettings", "F3 or Share/Back+Triangle/X"},
-                                {"Mute Game", "Share/Back+DpadRight"}};
+                                {"Mute Game", "F1 or Share/Back+DpadRight"},
+                                {"View Trophies", "F2 or Share/Back+DpadLeft"}};
 
         float window_width = ImGui::GetContentRegionAvail().x;
         float x = 0;
@@ -495,7 +526,8 @@ void DrawFullscreenHotkeysPause(bool& is_open) {
                                 {"Developer Tools", "Ctrl+F10 or Share/Back+Circle/B"},
                                 {"Show FPS", "F10 or Share/Back+L2"},
                                 {"ShowCurrentSettings", "F3 or Share/Back+Triangle/X"},
-                                {"Mute Game", "Share/Back+DpadRight"}};
+                                {"Mute Game", "F1 or Share/Back+DpadRight"},
+                                {"View Trophies", "F2 or Share/Back+DpadLeft"}};
 
         float window_width = ImGui::GetContentRegionAvail().x;
         float x = 0;
@@ -529,11 +561,9 @@ void DrawFullscreenHotkeysPause(bool& is_open) {
     }
     ImGui::End();
 }
-#ifdef ENABLE_QT_GUI
 
-void SaveConfigWithOverrides(const std::filesystem::path& path, bool perGame = false,
-                             const std::string& gameSerial = "") {
-
+void L::SaveConfigWithOverrides(const std::filesystem::path& path, bool perGame = false,
+                                const std::string& gameSerial = "") {
     toml::value overrides = toml::table{};
 
     // General settings
@@ -542,8 +572,10 @@ void SaveConfigWithOverrides(const std::filesystem::path& path, bool perGame = f
     overrides["General"]["isPSNSignedIn"] = Config::getPSNSignedIn();
     overrides["General"]["muteEnabled"] = Config::isMuteEnabled();
     overrides["General"]["isConnectedToNetwork"] = Config::getIsConnectedToNetwork();
+    overrides["General"]["isDevKit"] = Config::isDevKitConsole();
+    overrides["General"]["isPS4Pro"] = Config::isNeoModeConsole();
+    overrides["General"]["extraDmemInMbytes"] = Config::getExtraDmemInMbytes();
 
-    // GPU / Graphics settings
     overrides["GPU"]["allowHDR"] = Config::allowHDR();
     overrides["GPU"]["vblankFrequency"] = Config::vblankFreq();
     overrides["GPU"]["fsrEnabled"] = Config::getFsrEnabled();
@@ -555,10 +587,8 @@ void SaveConfigWithOverrides(const std::filesystem::path& path, bool perGame = f
     overrides["GPU"]["readbackSpeedMode"] = static_cast<int>(Config::readbackSpeed());
     overrides["GPU"]["presentMode"] = Config::getPresentMode();
 
-    // Logging
     overrides["Logging"]["logType"] = Config::getLogType();
 
-    // Ensure folder exists
     std::filesystem::create_directories(path.parent_path());
 
     std::ofstream ofs(path, std::ios::trunc);
@@ -566,8 +596,6 @@ void SaveConfigWithOverrides(const std::filesystem::path& path, bool perGame = f
         ofs.close();
     }
 }
-
-#endif
 
 void DrawFullscreenSettingsWindow(bool& is_open) {
     if (!is_open)
@@ -748,7 +776,7 @@ void DrawVirtualKeyboard() {
     ImGui::End();
 }
 
-void DrawPauseStatusWindow(bool& is_open) {
+void L::DrawPauseStatusWindow(bool& is_open) {
     if (!is_open)
         return;
 
@@ -767,7 +795,6 @@ void DrawPauseStatusWindow(bool& is_open) {
     ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoFocusOnAppearing |
                                    ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar;
 
-    // Controller focus logic
     if (Input::ControllerPressedOnce({Btn::Up}) || Input::ControllerPressedOnce({Btn::Down}) ||
         Input::ControllerPressedOnce({Btn::Left}) || Input::ControllerPressedOnce({Btn::Right})) {
         should_focus = true;
@@ -796,11 +823,225 @@ void DrawPauseStatusWindow(bool& is_open) {
         SDL_PushEvent(&e);
     }
 
+    ImGui::SameLine();
+
+    if (ImGui::Button("Trophy Viewer", ImVec2(200, 0))) {
+        ImGui::OpenPopup("Quick Trophy List Viewer");
+    }
+
+    static ImVec2 trophy_pos = ImVec2(200, 200);
+    static ImVec2 trophy_size = ImVec2(600, 400);
+    static float move_speed = 0.8f;
+    static float resize_speed = 0.8f;
+
+    bool using_controller = ImGui::IsKeyDown(ImGuiKey_GamepadL1);
+
+    if (using_controller) {
+        float lx = 0, ly = 0;
+
+        if (ImGui::IsKeyDown(ImGuiKey_GamepadLStickRight))
+            lx = 1;
+        if (ImGui::IsKeyDown(ImGuiKey_GamepadLStickLeft))
+            lx = -1;
+        if (ImGui::IsKeyDown(ImGuiKey_GamepadLStickDown))
+            ly = 1;
+        if (ImGui::IsKeyDown(ImGuiKey_GamepadLStickUp))
+            ly = -1;
+
+        trophy_pos.x += lx * move_speed;
+        trophy_pos.y += ly * move_speed;
+
+        float rx = 0, ry = 0;
+
+        if (ImGui::IsKeyDown(ImGuiKey_GamepadRStickRight))
+            rx = 1;
+        if (ImGui::IsKeyDown(ImGuiKey_GamepadRStickLeft))
+            rx = -1;
+        if (ImGui::IsKeyDown(ImGuiKey_GamepadRStickDown))
+            ry = 1;
+        if (ImGui::IsKeyDown(ImGuiKey_GamepadRStickUp))
+            ry = -1;
+
+        trophy_size.x = ImClamp(trophy_size.x + rx * resize_speed, 300.0f, 3000.0f);
+        trophy_size.y = ImClamp(trophy_size.y + ry * resize_speed, 300.0f, 3000.0f);
+    }
+
+    ImGui::SetNextWindowPos(trophy_pos,
+                            using_controller ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(trophy_size,
+                             using_controller ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
+
+    if (ImGui::BeginPopupModal("Quick Trophy List Viewer", nullptr,
+                               ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar)) {
+
+        if (!using_controller) {
+            trophy_pos = ImGui::GetWindowPos();
+            trophy_size = ImGui::GetWindowSize();
+        } else {
+            ImGui::SetNextWindowPos(trophy_pos, ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(trophy_size, ImGuiCond_FirstUseEver);
+        }
+
+        std::string gameSerial = MemoryPatcher::g_game_serial;
+
+        int unlockedCount = 0;
+        int totalCount = 0;
+
+        if (gameSerial.empty()) {
+            ImGui::Text("No game loaded.");
+        } else {
+            std::filesystem::path metaDir =
+                Common::FS::GetUserPath(Common::FS::PathType::MetaDataDir) / gameSerial /
+                "TrophyFiles";
+
+            if (!std::filesystem::exists(metaDir)) {
+                ImGui::Text("No trophy data found for this game.");
+            } else {
+                // First pass: count trophies
+                for (auto& dirEntry : std::filesystem::directory_iterator(metaDir)) {
+                    if (!dirEntry.is_directory())
+                        continue;
+
+                    std::string xmlPath = (dirEntry.path() / "Xml/TROP.XML").string();
+                    if (!std::filesystem::exists(xmlPath))
+                        continue;
+
+#ifdef ENABLE_QT_GUI
+                    QFile file(QString::fromStdString(xmlPath));
+                    if (!file.open(QFile::ReadOnly | QFile::Text))
+                        continue;
+
+                    QXmlStreamReader reader(&file);
+
+                    while (!reader.atEnd() && !reader.hasError()) {
+                        reader.readNext();
+                        if (reader.isStartElement() && reader.name().toString() == "trophy") {
+                            totalCount++;
+                            if (reader.attributes().hasAttribute("unlockstate") &&
+                                reader.attributes().value("unlockstate").toString() == "true") {
+                                unlockedCount++;
+                            }
+                        }
+                    }
+#endif
+                }
+
+                // Display the big title with the counter
+                ImGui::SetWindowFontScale(2.5f);
+#ifdef ENABLE_QT_GUI
+                TextCentered(("Trophies (" + std::to_string(unlockedCount) + "/" +
+                              std::to_string(totalCount) + ")")
+                                 .c_str());
+#else
+                TextCentered("SDL build can read trophy XML, use QT");
+#endif
+                ImGui::SetWindowFontScale(1.5f);
+                ImGui::Separator();
+
+                // Second pass: fill in the actual table content
+                for (auto& dirEntry : std::filesystem::directory_iterator(metaDir)) {
+                    if (!dirEntry.is_directory())
+                        continue;
+
+                    std::string xmlPath = (dirEntry.path() / "Xml/TROP.XML").string();
+                    if (!std::filesystem::exists(xmlPath))
+                        continue;
+
+#ifdef ENABLE_QT_GUI
+                    QFile file(QString::fromStdString(xmlPath));
+                    if (!file.open(QFile::ReadOnly | QFile::Text))
+                        continue;
+
+                    QXmlStreamReader reader(&file);
+
+                    ImGui::BeginChild(dirEntry.path().filename().string().c_str(), ImVec2(0, 0),
+                                      true, ImGuiWindowFlags_None);
+
+                    if (ImGui::BeginTable("TrophyTable", 2, ImGuiTableFlags_BordersInnerV)) {
+                        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                        ImGui::TableSetupColumn("Trophy Name", ImGuiTableColumnFlags_WidthStretch);
+
+                        ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+
+                        // Headers centered
+                        ImGui::TableSetColumnIndex(0);
+                        const char* statusHeader = "Status";
+                        float statusHeaderOffset =
+                            (ImGui::GetColumnWidth() - ImGui::CalcTextSize(statusHeader).x) * 0.5f;
+                        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + statusHeaderOffset);
+                        ImGui::TextUnformatted(statusHeader);
+
+                        ImGui::TableSetColumnIndex(1);
+                        const char* nameHeader = "Trophy Name";
+                        float nameHeaderOffset =
+                            (ImGui::GetColumnWidth() - ImGui::CalcTextSize(nameHeader).x) * 0.5f;
+                        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + nameHeaderOffset);
+                        ImGui::TextUnformatted(nameHeader);
+
+                        while (!reader.atEnd() && !reader.hasError()) {
+                            reader.readNext();
+                            if (reader.isStartElement() && reader.name().toString() == "trophy") {
+                                QString trophyName;
+                                bool unlocked = false;
+
+                                if (reader.attributes().hasAttribute("unlockstate") &&
+                                    reader.attributes().value("unlockstate").toString() == "true") {
+                                    unlocked = true;
+                                }
+
+                                while (!(reader.isEndElement() &&
+                                         reader.name().toString() == "trophy")) {
+                                    reader.readNext();
+                                    if (reader.isStartElement() &&
+                                        reader.name().toString() == "name") {
+                                        trophyName = reader.readElementText();
+                                    }
+                                }
+
+                                // Table row
+                                ImGui::TableNextRow();
+
+                                ImGui::TableSetColumnIndex(0);
+                                ImGui::PushStyleColor(ImGuiCol_Text, unlocked ? ImVec4(0, 1, 0, 1)
+                                                                              : ImVec4(1, 0, 0, 1));
+                                ImGui::SetWindowFontScale(1.0f);
+                                const char* statusText = unlocked ? "[O]" : "[X]";
+                                float statusOffset =
+                                    (ImGui::GetColumnWidth() - ImGui::CalcTextSize(statusText).x) *
+                                    0.5f;
+                                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + statusOffset);
+                                ImGui::TextUnformatted(statusText);
+                                ImGui::PopStyleColor();
+
+                                ImGui::TableSetColumnIndex(1);
+                                std::string nameStr = trophyName.toStdString();
+                                float nameOffset = (ImGui::GetColumnWidth() -
+                                                    ImGui::CalcTextSize(nameStr.c_str()).x) *
+                                                   0.5f;
+                                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + nameOffset);
+                                ImGui::TextUnformatted(nameStr.c_str());
+                            }
+                        }
+
+                        ImGui::EndTable();
+                    }
+
+                    ImGui::EndChild();
+#endif
+                }
+            }
+        }
+        if (ImGui::Button("Close")) {
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+
     ImGui::Separator();
     ImGui::TextDisabled("Tip: Use keyboard or controller hotkeys above.");
     ImGui::Spacing();
 
-    // === Table Layout ===
     if (ImGui::BeginTable("PauseMenuTable", 2, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableNextRow();
 
@@ -835,11 +1076,37 @@ void DrawPauseStatusWindow(bool& is_open) {
         if (ImGui::SliderInt("VBlank Freq", &vblank, 1, 500))
             Config::setVblankFreq(vblank);
 
-        static const char* readbackAccuracyStrs[] = {"Disable", "Unsafe", "Low", "Default", "Fast"};
-        int readbackAccIndex = static_cast<int>(Config::readbackSpeed());
-        if (ImGui::Combo("Readbacks Speed", &readbackAccIndex, readbackAccuracyStrs,
-                         IM_ARRAYSIZE(readbackAccuracyStrs))) {
-            Config::setReadbackSpeed(static_cast<Config::ReadbackSpeed>(readbackAccIndex));
+        ImGui::SeparatorText("Readback Speed");
+
+        static const char* readbackOptions[] = {"Disable", "Unsafe", "Low", "Default", "Fast"};
+
+        static int readbackIndex = static_cast<int>(Config::readbackSpeed());
+        if (ImGui::Combo("Readback Speed", &readbackIndex, readbackOptions,
+                         IM_ARRAYSIZE(readbackOptions))) {
+            Config::setReadbackSpeed(static_cast<Config::ReadbackSpeed>(readbackIndex));
+        }
+
+        ImGui::SeparatorText("System Modes");
+
+        static bool is_devkit = Config::isDevKitConsole();
+        if (ImGui::Checkbox("Devkit Mode", &is_devkit)) {
+            Config::setDevKitMode(is_devkit);
+        }
+
+        static bool is_neo = Config::isNeoModeConsole();
+        if (ImGui::Checkbox("PS4 Pro (Neo) Mode", &is_neo)) {
+            Config::setNeoMode(is_neo);
+        }
+
+        int extra_memory = Config::getExtraDmemInMbytes();
+        if (ImGui::InputInt("Extra Memory (MB)", &extra_memory, 500, 1000)) {
+            // Clamp between 0 and 9999
+            if (extra_memory < 0)
+                extra_memory = 0;
+            if (extra_memory > 9999)
+                extra_memory = 9999;
+
+            Config::setExtraDmemInMbytes(extra_memory);
         }
 
         bool fsr_enabled = Config::getFsrEnabled();
@@ -859,7 +1126,6 @@ void DrawPauseStatusWindow(bool& is_open) {
 
             if (ImGui::SliderFloat("RCAS Attenuation", &rcas_float, 0.0f, 3.0f, "%.2f")) {
                 fsr.rcasAttenuation = rcas_float;
-
                 Config::setRcasAttenuation(static_cast<int>(rcas_float * 1000));
             }
         }
@@ -972,9 +1238,8 @@ void DrawPauseStatusWindow(bool& is_open) {
             ImGui::CloseCurrentPopup();
         }
 
-#ifdef ENABLE_QT_GUI
         if (ImGui::Button("Per-Game Config", ImVec2(250, 0))) {
-            if (g_MainWindow->runningGameSerial.empty()) {
+            if (!MemoryPatcher::g_game_serial.empty()) {
                 SaveConfigWithOverrides(
                     Common::FS::GetUserPath(Common::FS::PathType::CustomConfigs) /
                         (MemoryPatcher::g_game_serial + ".toml"),
@@ -982,6 +1247,7 @@ void DrawPauseStatusWindow(bool& is_open) {
             }
             ImGui::CloseCurrentPopup();
         }
+
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(120, 0)))
             ImGui::CloseCurrentPopup();
@@ -997,10 +1263,10 @@ void DrawPauseStatusWindow(bool& is_open) {
         SDL_PushEvent(&event);
     }
 
-    // Save & Restart Emulator popup
     ImGui::SameLine(0.0f, 10.0f);
     if (ImGui::Button("Save & Restart Emulator"))
         ImGui::OpenPopup("Save Config As Restart Emulator");
+
     if (ImGui::BeginPopupModal("Save Config As Restart Emulator", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Where do you want to save the changes?");
@@ -1015,10 +1281,10 @@ void DrawPauseStatusWindow(bool& is_open) {
         }
 
         if (ImGui::Button("Per-Game Config", ImVec2(250, 0))) {
-            if (g_MainWindow && !g_MainWindow->runningGameSerial.empty()) {
+            if (!MemoryPatcher::g_game_serial.empty()) {
                 SaveConfigWithOverrides(
                     Common::FS::GetUserPath(Common::FS::PathType::CustomConfigs) /
-                        (g_MainWindow->runningGameSerial + ".toml"),
+                        (MemoryPatcher::g_game_serial + ".toml"),
                     true);
             }
             SDL_Event event{};
@@ -1026,10 +1292,11 @@ void DrawPauseStatusWindow(bool& is_open) {
             SDL_PushEvent(&event);
             ImGui::CloseCurrentPopup();
         }
+
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(120, 0)))
             ImGui::CloseCurrentPopup();
-#endif
+
         ImGui::EndPopup();
     }
 
@@ -1048,10 +1315,32 @@ void DrawPauseStatusWindow(bool& is_open) {
 void L::Draw() {
     const auto io = GetIO();
     PushID("DevtoolsLayer");
+    const bool blockHardcoded = Config::DisableHardcodedHotkeys();
 
-    if (IsKeyPressed(ImGuiKey_F3, false)) {
-        show_fullscreen_tip = !show_fullscreen_tip;
-        fullscreen_tip_manual = true;
+    static bool showPauseHelpWindow = true;
+    if (Config::getPauseOnUnfocus()) {
+
+        if (!(SDL_GetWindowFlags(g_window->GetSDLWindow()) & SDL_WINDOW_INPUT_FOCUS)) {
+            DrawPauseStatusWindow(showPauseHelpWindow);
+        }
+    }
+
+    if (!blockHardcoded) {
+        if (IsKeyPressed(ImGuiKey_F3, false)) {
+            show_fullscreen_tip = !show_fullscreen_tip;
+            fullscreen_tip_manual = true;
+        }
+    }
+
+    if (!blockHardcoded) {
+        if (IsKeyPressed(ImGuiKey_F2, false)) {
+            showTrophyViewer = !showTrophyViewer;
+        }
+    }
+    if (!blockHardcoded) {
+        if (Input::ControllerComboPressedOnce(Btn::TouchPad, Btn::Left)) {
+            showTrophyViewer = !showTrophyViewer;
+        }
     }
 
     const bool userQuitKeyboard =
@@ -1140,24 +1429,35 @@ void L::Draw() {
             SDL_PushEvent(&toggleFullscreenEvent);
         }
     }
+    if (!blockHardcoded) {
 
-    if (Input::ControllerComboPressedOnce(Btn::TouchPad, Btn::Triangle)) {
-        show_fullscreen_tip = !show_fullscreen_tip;
-        fullscreen_tip_manual = true;
+        if (Input::ControllerComboPressedOnce(Btn::TouchPad, Btn::Triangle)) {
+            show_fullscreen_tip = !show_fullscreen_tip;
+            fullscreen_tip_manual = true;
+        }
     }
 
 #ifdef ENABLE_QT_GUI
-    if (Input::ControllerComboPressedOnce(Btn::TouchPad, Btn::Right)) {
-        if (g_MainWindow)
-            g_MainWindow->ToggleMute();
+    if (!blockHardcoded) {
+
+        if (Input::ControllerComboPressedOnce(Btn::TouchPad, Btn::Right)) {
+            if (g_MainWindow)
+                g_MainWindow->ToggleMute();
+        }
+        if (IsKeyPressed(ImGuiKey_F1, false)) {
+            if (g_MainWindow)
+                g_MainWindow->ToggleMute();
+        }
     }
 #endif
+    if (!blockHardcoded) {
 
-    const bool show_debug_menu_combo =
-        Input::ControllerComboPressedOnce(Btn::TouchPad, Btn::Circle);
-    if (show_debug_menu_combo) {
-        DebugState.IsShowingDebugMenuBar() ^= true;
-        visibility_toggled = true;
+        const bool show_debug_menu_combo =
+            Input::ControllerComboPressedOnce(Btn::TouchPad, Btn::Circle);
+        if (show_debug_menu_combo) {
+            DebugState.IsShowingDebugMenuBar() ^= true;
+            visibility_toggled = true;
+        }
     }
 
     if (!DebugState.IsGuestThreadsPaused()) {
@@ -1195,9 +1495,7 @@ void L::Draw() {
     if (show_fullscreen_tip || fullscreen_tip_manual)
         DrawFullscreenSettingsWindow(show_fullscreen_tip);
 
-    static bool showPauseHelpWindow = true;
-
-    if (DebugState.IsGuestThreadsPaused()) {
+    if (!show_quit_window && DebugState.IsGuestThreadsPaused()) {
         DrawPauseStatusWindow(showPauseHelpWindow);
         DrawFullscreenHotkeysPause(show_hotkeys_pause);
     }
@@ -1237,53 +1535,325 @@ void L::Draw() {
         PopFont();
     }
 
+    int menu_count = 3;
+
+    const char* options[] = {
+        "Exit Game",
+        "Minimize Game",
+        "Cancel",
+    };
+
     if (show_quit_window) {
+
         ImVec2 center = ImGui::GetMainViewport()->GetCenter();
         ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 
-        if (Begin("Quit Notification", nullptr,
-                  ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoDecoration |
-                      ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking)) {
-            SetWindowFontScale(1.5f);
-            TextCentered("Are you sure you want to quit?");
-            NewLine();
-            Text("Press Escape or Circle/B button to cancel");
-            Text("Press Enter or Cross/A button to quit");
-            NewLine();
+        // Dim background
+        ImDrawList* draw_list = ImGui::GetForegroundDrawList();
+        ImVec2 viewport_size = ImGui::GetMainViewport()->Size;
+        draw_list->AddRectFilled(ImVec2(0, 0), viewport_size, IM_COL32(0, 0, 0, 80));
+
+        if (ImGui::Begin("Controller Exit Menu", nullptr,
+                         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoDecoration |
+                             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking)) {
+
+            ImGui::SetWindowFontScale(1.5f);
+            TextCentered("Select an option:");
+            ImGui::NewLine();
+
+            // Navigation
+            if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true) ||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown, true) ||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadLStickDown, true)) {
+                quit_menu_selection = (quit_menu_selection + 1) % menu_count;
+            }
+
+            if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true) ||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp, true) ||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadLStickUp, true)) {
+                quit_menu_selection = (quit_menu_selection + menu_count - 1) % menu_count;
+            }
+
+            // Draw menu items
+            for (int i = 0; i < menu_count; i++) {
+                if (i == quit_menu_selection) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 0, 1));
+                    TextCentered((std::string("> ") + options[i] + " <").c_str());
+                    ImGui::PopStyleColor();
+                } else {
+                    TextCentered(options[i]);
+                }
+            }
+
+            ImGui::NewLine();
+            ImGui::SetWindowFontScale(1.0f);
+
+            TextCentered("Use D-pad/Stick to navigate");
+            TextCentered("Press Cross/A to select, Circle/B to cancel");
+
+            // Confirm selection (Enter / Cross)
+            if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false)) {
+
+                switch (quit_menu_selection) {
+                case 0: {
+                    SDL_Event event{};
+                    SDL_memset(&event, 0, sizeof(event));
+                    event.type = SDL_EVENT_QUIT;
+                    SDL_PushEvent(&event);
+                    break;
+                }
+
+                case 1: {
+                    if (g_window && g_window->GetSDLWindow())
+                        SDL_MinimizeWindow(g_window->GetSDLWindow());
+                    show_quit_window = false;
+                    break;
+                }
+
+                case 2: {
+                    Overlay::ToggleQuitWindow();
+                    break;
+                }
+                }
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
+                ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+                Overlay::ToggleQuitWindow();
+            }
+            ImGui::End();
+        }
+    }
+
+    if (showTrophyViewer) {
+        ImGuiIO& io = ImGui::GetIO();
+        static bool trophy_focus = false;
+        static ImVec2 trophy_pos = ImVec2(200, 200);
+        static ImVec2 trophy_size = ImVec2(600, 400);
+        static float move_speed = 1.0f;
+        static float resize_speed = 1.0f;
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+        bool using_controller = ImGui::IsKeyDown(ImGuiKey_GamepadL1);
+
+        if (Input::ControllerPressedOnce({Btn::Up}) || Input::ControllerPressedOnce({Btn::Down})) {
+            trophy_focus = true;
+            ImGui::SetWindowFocus("Quick Trophy List Viewer");
+        }
+        if (!trophy_focus && using_controller) {
+            ImGui::ClearActiveID();
+        }
+
+        if (using_controller) {
+            float lx = 0, ly = 0;
+
+            if (ImGui::IsKeyDown(ImGuiKey_GamepadLStickRight))
+                lx = 1;
+            if (ImGui::IsKeyDown(ImGuiKey_GamepadLStickLeft))
+                lx = -1;
+            if (ImGui::IsKeyDown(ImGuiKey_GamepadLStickDown))
+                ly = 1;
+            if (ImGui::IsKeyDown(ImGuiKey_GamepadLStickUp))
+                ly = -1;
+
+            trophy_pos.x += lx * move_speed;
+            trophy_pos.y += ly * move_speed;
+
+            float rx = 0, ry = 0;
+
+            if (ImGui::IsKeyDown(ImGuiKey_GamepadRStickRight))
+                rx = 1;
+            if (ImGui::IsKeyDown(ImGuiKey_GamepadRStickLeft))
+                rx = -1;
+            if (ImGui::IsKeyDown(ImGuiKey_GamepadRStickDown))
+                ry = 1;
+            if (ImGui::IsKeyDown(ImGuiKey_GamepadRStickUp))
+                ry = -1;
+
+            trophy_size.x = ImClamp(trophy_size.x + rx * resize_speed, 300.0f, 3000.0f);
+            trophy_size.y = ImClamp(trophy_size.y + ry * resize_speed, 300.0f, 3000.0f);
+        }
+
+        ImGui::SetNextWindowPos(trophy_pos,
+                                using_controller ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(trophy_size,
+                                 using_controller ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
+
+        ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar |
+                                       ImGuiWindowFlags_NoFocusOnAppearing |
+                                       ImGuiWindowFlags_NoTitleBar;
+
+        if (ImGui::Begin("Quick Trophy List Viewer", nullptr, windowFlags)) {
+
+            if (!using_controller) {
+                trophy_pos = ImGui::GetWindowPos();
+                trophy_size = ImGui::GetWindowSize();
+            } else {
+                ImGui::SetNextWindowPos(trophy_pos, ImGuiCond_FirstUseEver);
+                ImGui::SetNextWindowSize(trophy_size, ImGuiCond_FirstUseEver);
+            }
+
+            std::string gameSerial = MemoryPatcher::g_game_serial;
+
+            int unlockedCount = 0;
+            int totalCount = 0;
+
+            if (gameSerial.empty()) {
+                ImGui::Text("No game loaded.");
+            } else {
+                std::filesystem::path metaDir =
+                    Common::FS::GetUserPath(Common::FS::PathType::MetaDataDir) / gameSerial /
+                    "TrophyFiles";
+
+                if (!std::filesystem::exists(metaDir)) {
+                    ImGui::Text("No trophy data found for this game.");
+                } else {
+                    // First pass: count trophies
+                    for (auto& dirEntry : std::filesystem::directory_iterator(metaDir)) {
+                        if (!dirEntry.is_directory())
+                            continue;
+
+                        std::string xmlPath = (dirEntry.path() / "Xml/TROP.XML").string();
+                        if (!std::filesystem::exists(xmlPath))
+                            continue;
 
 #ifdef ENABLE_QT_GUI
-            Text("Press Backspace or DpadUp button to Relaunch Emulator");
-            if (IsKeyPressed(ImGuiKey_Backspace, false) ||
-                IsKeyPressed(ImGuiKey_GamepadDpadUp, false)) {
-                SDL_Event event;
-                SDL_memset(&event, 0, sizeof(event));
-                event.type = SDL_EVENT_QUIT + 1;
-                SDL_PushEvent(&event);
-            }
+                        QFile file(QString::fromStdString(xmlPath));
+                        if (!file.open(QFile::ReadOnly | QFile::Text))
+                            continue;
+
+                        QXmlStreamReader reader(&file);
+
+                        while (!reader.atEnd() && !reader.hasError()) {
+                            reader.readNext();
+                            if (reader.isStartElement() && reader.name().toString() == "trophy") {
+                                totalCount++;
+                                if (reader.attributes().hasAttribute("unlockstate") &&
+                                    reader.attributes().value("unlockstate").toString() == "true") {
+                                    unlockedCount++;
+                                }
+                            }
+                        }
 #endif
-            if (IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
-                show_quit_window = false;
+                    }
+
+                    ImGui::SetWindowFontScale(2.5f);
+#ifdef ENABLE_QT_GUI
+                    TextCentered(("Trophies (" + std::to_string(unlockedCount) + "/" +
+                                  std::to_string(totalCount) + ")")
+                                     .c_str());
+#else
+                    TextCentered("SDL build can read trophy XML, use QT");
+#endif
+                    ImGui::SetWindowFontScale(1.5f);
+                    ImGui::Separator();
+
+                    for (auto& dirEntry : std::filesystem::directory_iterator(metaDir)) {
+                        if (!dirEntry.is_directory())
+                            continue;
+
+                        std::string xmlPath = (dirEntry.path() / "Xml/TROP.XML").string();
+                        if (!std::filesystem::exists(xmlPath))
+                            continue;
+
+#ifdef ENABLE_QT_GUI
+                        QFile file(QString::fromStdString(xmlPath));
+                        if (!file.open(QFile::ReadOnly | QFile::Text))
+                            continue;
+
+                        QXmlStreamReader reader(&file);
+
+                        ImGui::BeginChild(dirEntry.path().filename().string().c_str(), ImVec2(0, 0),
+                                          true, ImGuiWindowFlags_None);
+
+                        if (ImGui::BeginTable("TrophyTable", 2, ImGuiTableFlags_BordersInnerV)) {
+                            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed,
+                                                    80.0f);
+                            ImGui::TableSetupColumn("Trophy Name",
+                                                    ImGuiTableColumnFlags_WidthStretch);
+
+                            ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+
+                            ImGui::TableSetColumnIndex(0);
+                            const char* statusHeader = "Status";
+                            float statusHeaderOffset =
+                                (ImGui::GetColumnWidth() - ImGui::CalcTextSize(statusHeader).x) *
+                                0.5f;
+                            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + statusHeaderOffset);
+                            ImGui::TextUnformatted(statusHeader);
+
+                            ImGui::TableSetColumnIndex(1);
+                            const char* nameHeader = "Trophy Name";
+                            float nameHeaderOffset =
+                                (ImGui::GetColumnWidth() - ImGui::CalcTextSize(nameHeader).x) *
+                                0.5f;
+                            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + nameHeaderOffset);
+                            ImGui::TextUnformatted(nameHeader);
+
+                            while (!reader.atEnd() && !reader.hasError()) {
+                                reader.readNext();
+                                if (reader.isStartElement() &&
+                                    reader.name().toString() == "trophy") {
+                                    QString trophyName;
+                                    bool unlocked = false;
+
+                                    if (reader.attributes().hasAttribute("unlockstate") &&
+                                        reader.attributes().value("unlockstate").toString() ==
+                                            "true") {
+                                        unlocked = true;
+                                    }
+
+                                    while (!(reader.isEndElement() &&
+                                             reader.name().toString() == "trophy")) {
+                                        reader.readNext();
+                                        if (reader.isStartElement() &&
+                                            reader.name().toString() == "name") {
+                                            trophyName = reader.readElementText();
+                                        }
+                                    }
+
+                                    ImGui::TableNextRow();
+
+                                    ImGui::TableSetColumnIndex(0);
+                                    ImGui::PushStyleColor(ImGuiCol_Text, unlocked
+                                                                             ? ImVec4(0, 1, 0, 1)
+                                                                             : ImVec4(1, 0, 0, 1));
+                                    ImGui::SetWindowFontScale(1.0f);
+                                    const char* statusText = unlocked ? "[O]" : "[X]";
+                                    float statusOffset = (ImGui::GetColumnWidth() -
+                                                          ImGui::CalcTextSize(statusText).x) *
+                                                         0.5f;
+                                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + statusOffset);
+                                    ImGui::TextUnformatted(statusText);
+                                    ImGui::PopStyleColor();
+
+                                    ImGui::TableSetColumnIndex(1);
+                                    std::string nameStr = trophyName.toStdString();
+                                    float nameOffset = (ImGui::GetColumnWidth() -
+                                                        ImGui::CalcTextSize(nameStr.c_str()).x) *
+                                                       0.5f;
+                                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + nameOffset);
+                                    ImGui::TextUnformatted(nameStr.c_str());
+                                }
+                            }
+
+                            ImGui::EndTable();
+                        }
+
+                        ImGui::EndChild();
+#endif
+                    }
+                }
             }
 
-            if (IsKeyPressed(ImGuiKey_Enter, false) ||
-                IsKeyPressed(ImGuiKey_GamepadFaceDown, false)) {
-                SDL_Event event;
-                SDL_memset(&event, 0, sizeof(event));
-                event.type = SDL_EVENT_QUIT;
-                SDL_PushEvent(&event);
+            if (ImGui::Button("Close")) {
+                showTrophyViewer = false;
+                trophy_focus = false;
             }
+
+            ImGui::End();
         }
-        End();
     }
 
     PopID();
-}
-
-void L::TextCentered(const std::string& text) {
-    float window_width = ImGui::GetWindowSize().x;
-    float text_width = ImGui::CalcTextSize(text.c_str()).x;
-    float text_indentation = (window_width - text_width) * 0.5f;
-
-    ImGui::SameLine(text_indentation);
-    ImGui::Text("%s", text.c_str());
 }

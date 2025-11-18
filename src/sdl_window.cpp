@@ -31,6 +31,7 @@
 #ifdef __APPLE__
 #include "SDL3/SDL_metal.h"
 #endif
+static bool pause_due_to_focus_loss = false;
 
 namespace Input {
 
@@ -381,6 +382,23 @@ void WindowSDL::WaitEvent() {
         return;
     }
     switch (event.type) {
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+        if (Config::getPauseOnUnfocus()) {
+            if (!DebugState.IsGuestThreadsPaused()) {
+                DebugState.PauseGuestThreads();
+                pause_due_to_focus_loss = true;
+            }
+        }
+        break;
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+        if (Config::getPauseOnUnfocus()) {
+
+            if (pause_due_to_focus_loss) {
+                DebugState.ResumeGuestThreads();
+                pause_due_to_focus_loss = false;
+            }
+        }
+        break;
     case SDL_EVENT_WINDOW_RESIZED:
     case SDL_EVENT_WINDOW_MAXIMIZED:
     case SDL_EVENT_WINDOW_RESTORED:
@@ -594,6 +612,15 @@ void WindowSDL::OnKeyboardMouseInput(const SDL_Event* event) {
     if (event->type == SDL_EVENT_MOUSE_WHEEL) {
         const SDL_Event* copy = new SDL_Event(*event);
         SDL_AddTimer(33, wheelOffCallback, (void*)copy);
+    }
+
+    if (event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
+        event->gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE) {
+        SDL_Event quit_event;
+        SDL_memset(&quit_event, 0, sizeof(quit_event));
+        quit_event.type = SDL_EVENT_QUIT_DIALOG;
+        SDL_PushEvent(&quit_event);
+        return;
     }
 
     // add/remove it from the list

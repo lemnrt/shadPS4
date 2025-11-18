@@ -5,14 +5,17 @@
 
 #include <shared_mutex>
 #include <boost/container/small_vector.hpp>
+#include <queue>
 #include <tsl/robin_map.h>
 
+#include "common/enum.h"
 #include "common/lru_cache.h"
 #include "common/slot_vector.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/multi_level_page_table.h"
+#include "video_core/texture_cache/image.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -36,6 +39,15 @@ class TextureCache;
 class MemoryTracker;
 class PageManager;
 
+enum class ObtainBufferFlags {
+    None = 0,
+    IsWritten = 1 << 0,
+    IsTexelBuffer = 1 << 1,
+    IgnoreStreamBuffer = 1 << 2,
+    InvalidateTextureCache = 1 << 3,
+};
+DECLARE_ENUM_FLAG_OPERATORS(ObtainBufferFlags)
+
 class BufferCache {
 public:
     static constexpr u32 CACHING_PAGEBITS = 14;
@@ -51,8 +63,12 @@ public:
     static constexpr s64 DEFAULT_CRITICAL_GC_MEMORY = 2_GB;
     static constexpr s64 TARGET_GC_THRESHOLD = 8_GB;
 
+    struct PageData {
+        BufferId buffer_id{};
+    };
+
     struct Traits {
-        using Entry = BufferId;
+        using Entry = PageData;
         static constexpr size_t AddressSpaceBits = 40;
         static constexpr size_t FirstLevelBits = 16;
         static constexpr size_t PageBits = CACHING_PAGEBITS;
@@ -117,10 +133,13 @@ public:
     }
 
     /// Invalidates any buffer in the logical page range.
-    void InvalidateMemory(VAddr device_addr, u64 size);
+    void InvalidateMemory(VAddr device_addr, u64 size, bool download);
 
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false);
+
+    /// Flushes GPU modified ranges of the uncovered part of the edge pages of an image.
+    void ReadEdgeImagePages(const Image& image);
 
     /// Binds host vertex buffers for the current draw.
     void BindVertexBuffers(const Vulkan::GraphicsPipeline& pipeline);
@@ -135,20 +154,24 @@ public:
     void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
 
     /// Obtains a buffer for the specified region.
-    std::pair<Buffer*, u32> ObtainBuffer(VAddr gpu_addr, u32 size, bool is_written,
-                                         bool is_texel_buffer = false, BufferId buffer_id = {});
+    [[nodiscard]] std::pair<Buffer*, u32> ObtainBuffer(
+        VAddr gpu_addr, u32 size, ObtainBufferFlags flags = ObtainBufferFlags::None,
+        BufferId buffer_id = {});
 
     /// Attempts to obtain a buffer without modifying the cache contents.
-    std::pair<Buffer*, u32> ObtainBufferForImage(VAddr gpu_addr, u32 size);
+    [[nodiscard]] std::pair<Buffer*, u32> ObtainBufferForImage(VAddr gpu_addr, u32 size);
 
     /// Return true when a region is registered on the cache
-    bool IsRegionRegistered(VAddr addr, size_t size);
+    [[nodiscard]] bool IsRegionRegistered(VAddr addr, size_t size);
 
     /// Return true when a CPU region is modified from the CPU
-    bool IsRegionCpuModified(VAddr addr, size_t size);
+    [[nodiscard]] bool IsRegionCpuModified(VAddr addr, size_t size);
 
     /// Return true when a CPU region is modified from the GPU
-    bool IsRegionGpuModified(VAddr addr, size_t size);
+    [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
+
+    /// Mark region as modified from the GPU
+    void MarkRegionAsGpuModified(VAddr addr, size_t size);
 
     /// Return buffer id for the specified region
     BufferId FindBuffer(VAddr device_addr, u32 size);
@@ -165,11 +188,27 @@ public:
     /// Synchronizes all buffers neede for DMA.
     void SynchronizeDmaBuffers();
 
+    /// Record memory barrier. Used for buffers when accessed via BDA.
+    void MemoryBarrier();
+
     /// Runs the garbage collector.
     void RunGarbageCollector();
 
     /// Notifies memory tracker of GPU modified ranges from the last CPU fence.
     void CommitPendingGpuRanges();
+    void EnqueueForGc(std::function<void()> fn);
+    void RunGarbageCollectorAsync();
+    mutable std::mutex gc_mutex;
+    std::queue<std::function<void()>> gc_queue;
+    u64 GetTriggerGcMemory() const {
+        return trigger_gc_memory;
+    }
+    u64 GetPressureGcMemory() const {
+        return pressure_gc_memory;
+    }
+    u64 GetCriticalGcMemory() const {
+        return critical_gc_memory;
+    }
 
 private:
     template <typename Func>
@@ -187,7 +226,6 @@ private:
 
     template <bool async>
     void DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size, bool is_write);
-
     [[nodiscard]] OverlapResult ResolveOverlaps(VAddr device_addr, u32 wanted_size);
 
     void JoinOverlap(BufferId new_buffer_id, BufferId overlap_id, bool accumulate_stream_score);
@@ -234,6 +272,7 @@ private:
     Common::SlotVector<Buffer> slot_buffers;
     u64 total_used_memory = 0;
     u64 trigger_gc_memory = 0;
+    u64 pressure_gc_memory = 0;
     u64 critical_gc_memory = 0;
     u64 gc_tick = 0;
     Common::LeastRecentlyUsedCache<BufferId, u64> lru_cache;

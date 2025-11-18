@@ -36,6 +36,8 @@
 #include "core/file_format/trp.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/disc_map/disc_map.h"
+#include "core/libraries/font/font.h"
+#include "core/libraries/font/fontft.h"
 #include "core/libraries/libc_internal/libc_internal.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/ngs2/ngs2.h"
@@ -116,6 +118,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     std::string id;
     std::string title;
     std::string app_version;
+    u32 sdk_version;
     u32 fw_version;
     Common::PSFAttributes psf_attributes{};
     if (param_sfo_exists) {
@@ -135,6 +138,44 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
         if (const auto raw_attributes = param_sfo->GetInteger("ATTRIBUTE")) {
             psf_attributes.raw = *raw_attributes;
         }
+
+        // Extract sdk version from pubtool info.
+        std::string_view pubtool_info =
+            param_sfo->GetString("PUBTOOLINFO").value_or("Unknown value");
+        u64 sdk_ver_offset = pubtool_info.find("sdk_ver");
+
+        if (sdk_ver_offset == pubtool_info.npos) {
+            // Default to using firmware version if SDK version is not found.
+            sdk_version = fw_version;
+        } else {
+            // Increment offset to account for sdk_ver= part of string.
+            sdk_ver_offset += 8;
+            u64 sdk_ver_len = pubtool_info.find(",", sdk_ver_offset);
+            if (sdk_ver_len == pubtool_info.npos) {
+                // If there's no more commas, this is likely the last entry of pubtool info.
+                // Use string length instead.
+                sdk_ver_len = pubtool_info.size();
+            }
+            sdk_ver_len -= sdk_ver_offset;
+            std::string sdk_ver_string = pubtool_info.substr(sdk_ver_offset, sdk_ver_len).data();
+            // Number is stored in base 16.
+            sdk_version = std::stoi(sdk_ver_string, nullptr, 16);
+        }
+    }
+
+    auto& game_info = Common::ElfInfo::Instance();
+    game_info.initialized = true;
+    game_info.game_serial = id;
+    game_info.title = title;
+    game_info.app_ver = app_version;
+    game_info.firmware_ver = fw_version & 0xFFF00000;
+    game_info.raw_firmware_ver = fw_version;
+    game_info.sdk_ver = sdk_version;
+    game_info.psf_attributes = psf_attributes;
+
+    const auto pic1_path = mnt->GetHostPath("/app0/sce_sys/pic1.png");
+    if (std::filesystem::exists(pic1_path)) {
+        game_info.splash_path = pic1_path;
     }
 
     bool forceGlobal = false;
@@ -144,6 +185,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
             forceGlobal = true;
         }
     }
+    game_info.game_folder = game_folder;
 
     if (forceGlobal) {
         // load global config only
@@ -213,6 +255,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     if (param_sfo_exists) {
         LOG_INFO(Loader, "Game id: {} Title: {}", id, title);
         LOG_INFO(Loader, "Fw: {:#x} App Version: {}", fw_version, app_version);
+        LOG_INFO(Loader, "Compiled SDK version: {:#x}", sdk_version);
         LOG_INFO(Loader, "PSVR Supported: {}", (bool)psf_attributes.support_ps_vr.Value());
         LOG_INFO(Loader, "PSVR Required: {}", (bool)psf_attributes.require_ps_vr.Value());
     }
@@ -255,22 +298,6 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
         Config::SetSkippedShaderHashes("Default");
         Config::SetSkippedShaderHashes(id);
     }
-
-    auto& game_info = Common::ElfInfo::Instance();
-    game_info.initialized = true;
-    game_info.game_serial = id;
-    game_info.title = title;
-    game_info.app_ver = app_version;
-    game_info.firmware_ver = fw_version & 0xFFF00000;
-    game_info.raw_firmware_ver = fw_version;
-    game_info.psf_attributes = psf_attributes;
-
-    const auto pic1_path = mnt->GetHostPath("/app0/sce_sys/pic1.png");
-    if (std::filesystem::exists(pic1_path)) {
-        game_info.splash_path = pic1_path;
-    }
-
-    game_info.game_folder = game_folder;
 
     std::string game_title = fmt::format("{} - {} <{}>", id, title, app_version);
     std::string window_title = "";
@@ -501,8 +528,8 @@ void Emulator::LoadSystemModules(const std::string& game_serial) {
          {"libSceJson2.sprx", nullptr},
          {"libSceLibcInternal.sprx", &Libraries::LibcInternal::RegisterLib},
          {"libSceCesCs.sprx", nullptr},
-         {"libSceFont.sprx", nullptr},
-         {"libSceFontFt.sprx", nullptr},
+         {"libSceFont.sprx", &Libraries::Font::RegisterlibSceFont},
+         {"libSceFontFt.sprx", &Libraries::FontFt::RegisterlibSceFontFt},
          {"libSceFreeTypeOt.sprx", nullptr}});
 
     std::vector<std::filesystem::path> found_modules;

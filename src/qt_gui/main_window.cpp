@@ -11,6 +11,7 @@
 #include <QStyleFactory>
 #include <signal.h>
 #include "emulator.h"
+#include "mod_manager_dialog.h"
 
 #include "SDL3/SDL_events.h"
 
@@ -18,6 +19,7 @@
 #include <QKeyEvent>
 #include <QPlainTextEdit>
 #include <QProgressDialog>
+#include <QSplitter>
 #include <QStatusBar>
 
 #include "about_dialog.h"
@@ -82,16 +84,13 @@ bool MainWindow::Init() {
     CreateActions();
     CreateRecentGameActions();
     ConfigureGuiFromSettings();
-    CreateDockWindows();
+    CreateDockWindows(true);
     CreateConnects();
     SetLastUsedTheme();
     ApplyLastUsedStyle();
     SetLastIconSizeBullet();
     toggleColorFilter();
 
-    if (!Config::getFirstBootHandled()) {
-        UserPath();
-    } // show ui
     setMinimumSize(720, 405);
     std::string window_title = "";
     std::string remote_url(Common::g_scm_remote_url);
@@ -129,6 +128,7 @@ bool MainWindow::Init() {
         ui->updaterButton->installEventFilter(this);
         ui->configureHotkeysButton->installEventFilter(this);
         ui->versionButton->installEventFilter(this);
+        ui->modManagerButton->installEventFilter(this);
     }
 
     if (!Config::getEnableColorFilter()) {
@@ -144,6 +144,7 @@ bool MainWindow::Init() {
         ui->updaterButton->removeEventFilter(this);
         ui->configureHotkeysButton->removeEventFilter(this);
         ui->versionButton->removeEventFilter(this);
+        ui->modManagerButton->removeEventFilter(this);
     }
 
     QString savedStyle = QString::fromStdString(Config::getGuiStyle());
@@ -160,40 +161,6 @@ bool MainWindow::Init() {
             }
         }
     }
-
-    if (Config::getAutoRestartGame()) {
-        int argc = QCoreApplication::arguments().size();
-        std::string gamePath;
-
-        if (argc > 1) {
-            QString lastGameArg = QCoreApplication::arguments().at(1);
-            if (!lastGameArg.isEmpty() && std::filesystem::exists(lastGameArg.toStdString())) {
-                gamePath = lastGameArg.toStdString();
-            }
-        } else {
-            std::vector<std::string> recents = Config::getRecentFiles();
-            if (!recents.empty() && std::filesystem::exists(recents[0])) {
-                gamePath = recents[0];
-            }
-        }
-
-        if (!gamePath.empty()) {
-            if (Config::getRestartWithBaseGame()) {
-                Core::FileSys::MntPoints::ignore_game_patches = true;
-                StartEmulator(gamePath);
-                Core::FileSys::MntPoints::ignore_game_patches = false;
-
-            } else {
-                StartEmulator(gamePath);
-            }
-        }
-
-        const auto config_dir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
-
-        Config::setAutoRestartGame(false);
-        Config::save(config_dir / "config.toml");
-    }
-
 #ifdef ENABLE_UPDATER
     // Check for update
     CheckUpdateMain(true);
@@ -218,107 +185,6 @@ bool MainWindow::Init() {
 #endif
 
     return true;
-}
-
-void MainWindow::UserPath() {
-    std::filesystem::path portable_dir = std::filesystem::current_path() / "user";
-    std::filesystem::path global_dir;
-
-#if _WIN32
-    if (auto* appdata = getenv("APPDATA")) {
-        global_dir = std::filesystem::path(appdata) / "shadPS4";
-    } else {
-        TCHAR appdataPath[MAX_PATH] = {0};
-        SHGetFolderPath(NULL, CSIDL_APPDATA, NULL, 0, appdataPath);
-        global_dir = std::filesystem::path(appdataPath) / "shadPS4";
-    }
-#elif defined(__APPLE__)
-    global_dir =
-        std::filesystem::path(getenv("HOME")) / "Library" / "Application Support" / "shadPS4";
-#else
-    const char* xdg_data_home = getenv("XDG_DATA_HOME");
-    if (xdg_data_home && strlen(xdg_data_home) > 0) {
-        global_dir = std::filesystem::path(xdg_data_home) / "shadPS4";
-    } else {
-        global_dir = std::filesystem::path(getenv("HOME")) / ".local" / "share" / "shadPS4";
-    }
-#endif
-
-    bool portableExists = std::filesystem::exists(portable_dir);
-    bool globalExists = std::filesystem::exists(global_dir);
-
-    std::filesystem::path user_dir;
-
-#ifdef ENABLE_QT_GUI
-    if (!Config::getFirstBootHandled()) {
-        if (globalExists && !portableExists) {
-            auto copyResponse = QMessageBox::question(
-                this, tr("Copy Global Folder?"),
-                tr("A global user folder exists.\n"
-                   "Do you want to copy it next to the executable for portable use?"),
-                QMessageBox::Yes | QMessageBox::No);
-
-            if (copyResponse == QMessageBox::Yes) {
-                std::filesystem::copy(global_dir, portable_dir,
-                                      std::filesystem::copy_options::recursive);
-                user_dir = portable_dir;
-                QMessageBox::information(
-                    this, tr("Portable user folder created"),
-                    tr("Global folder copied to portable folder successfully."));
-            } else {
-                auto useGlobal =
-                    QMessageBox::question(this, tr("Choose User Folder"),
-                                          tr("Do you want to use the global folder as-is?\n"
-                                             "Yes = Use global\nNo = Create empty portable folder"),
-                                          QMessageBox::Yes | QMessageBox::No);
-
-                if (useGlobal == QMessageBox::Yes) {
-                    user_dir = global_dir;
-                } else {
-                    std::filesystem::create_directories(portable_dir);
-                    user_dir = portable_dir;
-                    QMessageBox::information(
-                        this, tr("Portable user folder created"),
-                        tr("%1 successfully created - Relaunch Emulator to Configure")
-                            .arg(QString::fromStdString(portable_dir.string())));
-                }
-            }
-        } else if (portableExists) {
-            user_dir = portable_dir;
-        } else if (globalExists) {
-            user_dir = global_dir;
-        } else {
-            std::filesystem::create_directories(portable_dir);
-            user_dir = portable_dir;
-            QMessageBox::information(this, tr("Portable user folder created"),
-                                     tr("%1 successfully created - Relaunch Emulator to Configure")
-                                         .arg(QString::fromStdString(portable_dir.string())));
-        }
-        Config::setFirstBootHandled(true);
-        auto config_dir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
-        Config::save(config_dir / "config.toml");
-    } else {
-        if (portableExists)
-            user_dir = portable_dir;
-        else if (globalExists)
-            user_dir = global_dir;
-        else {
-            std::filesystem::create_directories(portable_dir);
-            user_dir = portable_dir;
-        }
-    }
-#else
-    if (portableExists)
-        user_dir = portable_dir;
-    else if (globalExists)
-        user_dir = global_dir;
-    else {
-        std::filesystem::create_directories(portable_dir);
-        user_dir = portable_dir;
-    }
-#endif
-
-    Common::FS::SetUserPath(Common::FS::PathType::UserDir, user_dir);
 }
 
 void MainWindow::toggleColorFilter() {
@@ -441,23 +307,29 @@ void MainWindow::AddUiWidgets() {
     ui->toolBar->addWidget(
         createButtonWithLabel(ui->configureHotkeysButton, tr("Hotkeys"), showLabels));
     ui->toolBar->addWidget(createButtonWithLabel(ui->updaterButton, tr("Update"), showLabels));
+
     QFrame* line = new QFrame(this);
     line->setFrameShape(QFrame::VLine);
     line->setFrameShadow(QFrame::Sunken);
     line->setMinimumWidth(2);
     ui->toolBar->addWidget(line);
     ui->toolBar->addWidget(createSpacer(this));
+
     if (showLabels) {
         QLabel* pauseButtonLabel = ui->pauseButton->parentWidget()->findChild<QLabel*>();
         if (pauseButtonLabel) {
             pauseButtonLabel->setVisible(false);
         }
     }
+
     ui->toolBar->addWidget(
         createButtonWithLabel(ui->refreshButton, tr("Refresh List"), showLabels));
     ui->toolBar->addWidget(createButtonWithLabel(ui->versionButton, tr("Version"), showLabels));
+    ui->toolBar->addWidget(
+        createButtonWithLabel(ui->modManagerButton, tr("Mods Manager"), showLabels));
 
     ui->toolBar->addWidget(createSpacer(this));
+
     QBoxLayout* toolbarLayout = new QBoxLayout(QBoxLayout::TopToBottom);
     toolbarLayout->setSpacing(2);
     toolbarLayout->setContentsMargins(2, 2, 2, 2);
@@ -473,12 +345,7 @@ void MainWindow::AddUiWidgets() {
     searchSliderLayout->addWidget(ui->mw_searchbar);
 
     searchSliderContainer->setLayout(searchSliderLayout);
-
     ui->toolBar->addWidget(searchSliderContainer);
-    toolbarLayout->setSpacing(2);
-    QLabel* styleLabel = new QLabel(tr("GUI Style Selector"), this);
-    styleLabel->setAlignment(Qt::AlignCenter);
-    ui->toolBar->addWidget(styleLabel);
 
     ui->styleSelector->clear();
 
@@ -512,7 +379,39 @@ void MainWindow::AddUiWidgets() {
         ui->styleSelector->setCurrentText(QApplication::style()->objectName());
     }
 
-    ui->toolBar->addWidget(ui->styleSelector);
+    QWidget* styleAndLogContainer = new QWidget(this);
+    QVBoxLayout* styleAndLogLayout = new QVBoxLayout(styleAndLogContainer);
+    styleAndLogLayout->setContentsMargins(2, 2, 2, 2);
+    styleAndLogLayout->setSpacing(4);
+
+    QHBoxLayout* styleRowLayout = new QHBoxLayout();
+    styleRowLayout->setContentsMargins(0, 0, 0, 0);
+    styleRowLayout->setSpacing(6);
+
+    QLabel* styleLabel = new QLabel(tr("GUI Style:"), this);
+    styleLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+
+    styleRowLayout->addWidget(styleLabel);
+    styleRowLayout->addWidget(ui->styleSelector, 0);
+    styleRowLayout->addStretch();
+
+    styleAndLogLayout->addLayout(styleRowLayout);
+
+    QHBoxLayout* logButtonRow = new QHBoxLayout();
+    logButtonRow->setContentsMargins(0, 0, 0, 0);
+    logButtonRow->setSpacing(0);
+
+    QSpacerItem* offsetSpacer = new QSpacerItem(styleLabel->sizeHint().width(), 0,
+                                                QSizePolicy::Fixed, QSizePolicy::Minimum);
+
+    logButtonRow->addItem(offsetSpacer);
+    logButtonRow->addWidget(ui->toggleLogButton, 0, Qt::AlignHCenter);
+    logButtonRow->addStretch();
+
+    styleAndLogLayout->addLayout(logButtonRow);
+
+    styleAndLogContainer->setLayout(styleAndLogLayout);
+    ui->toolBar->addWidget(styleAndLogContainer);
 
     ui->playButton->setVisible(true);
     ui->pauseButton->setVisible(false);
@@ -584,7 +483,7 @@ void MainWindow::UpdateToolbarLabels() {
     for (QPushButton* button :
          {ui->playButton, ui->stopButton, ui->restartButton, ui->settingsButton,
           ui->fullscreenButton, ui->controllerButton, ui->keyboardButton, ui->versionButton,
-          ui->configureHotkeysButton, ui->updaterButton, ui->refreshButton}) {
+          ui->configureHotkeysButton, ui->updaterButton, ui->refreshButton, ui->modManagerButton}) {
         QLabel* label = button->parentWidget()->findChild<QLabel*>();
         if (label)
             label->setVisible(showLabels);
@@ -598,55 +497,107 @@ void MainWindow::UpdateToolbarLabels() {
     Config::saveMainWindow(config_dir / "config.toml");
 }
 
-void MainWindow::CreateDockWindows() {
-    // place holder widget is needed for good health they say :)
+void MainWindow::CreateDockWindows(bool newDock) {
     QWidget* phCentralWidget = new QWidget(this);
     setCentralWidget(phCentralWidget);
 
-    m_dock_widget.reset(new QDockWidget(tr("Game List"), this));
-    m_game_list_frame.reset(new GameListFrame(m_game_info, m_compat_info, m_ipc_client, this));
-    m_game_list_frame->setObjectName("gamelist");
-    m_game_list_frame->SetThemeColors(m_window_themes.textColor());
-    m_game_grid_frame.reset(new GameGridFrame(m_game_info, m_compat_info, m_ipc_client, this));
-    m_game_grid_frame->setObjectName("gamegridlist");
-    m_elf_viewer.reset(new ElfViewer(this));
-    m_elf_viewer->setObjectName("elflist");
+    QWidget* dockContents = new QWidget(this);
+    QVBoxLayout* dockLayout = new QVBoxLayout(dockContents);
+
+    ui->splitter = new QSplitter(Qt::Vertical);
+    ui->logDisplay = new QTextEdit(ui->splitter);
+    ui->logDisplay->setText(tr("Game Log"));
+    ui->logDisplay->setReadOnly(true);
+
+    if (newDock) {
+        m_dock_widget.reset(new QDockWidget(tr("Game List"), this));
+        m_game_list_frame.reset(new GameListFrame(m_game_info, m_compat_info, m_ipc_client, this));
+
+        m_game_list_frame->setObjectName("gamelist");
+        m_game_grid_frame.reset(new GameGridFrame(m_game_info, m_compat_info, m_ipc_client, this));
+
+        m_game_grid_frame->setObjectName("gamegridlist");
+        m_elf_viewer.reset(new ElfViewer(this));
+        m_elf_viewer->setObjectName("elflist");
+    }
 
     int table_mode = Config::getTableMode();
     int slider_pos = 0;
-    if (table_mode == 0) { // List
+
+    if (table_mode == 0) {
         m_game_grid_frame->hide();
         m_elf_viewer->hide();
         m_game_list_frame->show();
-        m_dock_widget->setWidget(m_game_list_frame.data());
-        slider_pos = Config::getSliderPosition();
-        ui->sizeSlider->setSliderPosition(slider_pos); // set slider pos at start;
+        if (!newDock) {
+            m_game_list_frame->clearContents();
+            m_game_list_frame->PopulateGameList();
+        }
+        ui->splitter->addWidget(m_game_list_frame.data());
+        ui->sizeSlider->setSliderPosition(slider_pos);
         isTableList = true;
-    } else if (table_mode == 1) { // Grid
+    } else if (table_mode == 1) {
         m_game_list_frame->hide();
         m_elf_viewer->hide();
         m_game_grid_frame->show();
-        m_dock_widget->setWidget(m_game_grid_frame.data());
-        slider_pos = Config::getSliderPositionGrid();
-        ui->sizeSlider->setSliderPosition(slider_pos); // set slider pos at start;
+        if (!newDock) {
+            if (m_game_grid_frame->item(0, 0) == nullptr) {
+                m_game_grid_frame->clearContents();
+                m_game_grid_frame->PopulateGameGrid(m_game_info->m_games, false);
+            }
+        }
+        ui->splitter->addWidget(m_game_grid_frame.data());
+        ui->sizeSlider->setSliderPosition(slider_pos);
         isTableList = false;
     } else {
         m_game_list_frame->hide();
         m_game_grid_frame->hide();
         m_elf_viewer->show();
-        m_dock_widget->setWidget(m_elf_viewer.data());
+        ui->splitter->addWidget(m_elf_viewer.data());
         isTableList = false;
     }
+
+    QPalette logPalette = ui->logDisplay->palette();
+    logPalette.setColor(QPalette::Base, Qt::black);
+    ui->logDisplay->setPalette(logPalette);
+    ui->splitter->addWidget(ui->logDisplay);
+
+    QList<int> defaultSizes = {800, 200, 50};
+    QList<int> sizes = m_compat_info->LoadDockWidgetSizes();
+    if (sizes.isEmpty() || sizes.size() < 3 || sizes[1] == 0)
+        sizes = defaultSizes;
+
+    ui->splitter->setSizes(sizes);
+    ui->splitter->setCollapsible(0, false);
+    ui->splitter->setCollapsible(1, false);
+
+    dockLayout->addWidget(ui->splitter);
+    dockContents->setLayout(dockLayout);
+    m_dock_widget->setWidget(dockContents);
+
+    ui->welcomeAct->setCheckable(true);
+    ui->welcomeAct->setChecked(Config::getShowWelcomeDialog());
+
+    ui->pauseOnUnfocusAct->setCheckable(true);
+    ui->pauseOnUnfocusAct->setChecked(Config::getPauseOnUnfocus());
 
     m_dock_widget->setAllowedAreas(Qt::AllDockWidgetAreas);
     m_dock_widget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_dock_widget->resize(this->width(), this->height());
-    addDockWidget(Qt::LeftDockWidgetArea, m_dock_widget.data());
-    this->setDockNestingEnabled(true);
 
-    // handle resize like this for now, we deal with it when we add more docks
-    connect(this, &MainWindow::WindowResized, this, [&]() {
-        this->resizeDocks({m_dock_widget.data()}, {this->width()}, Qt::Orientation::Horizontal);
+    addDockWidget(Qt::LeftDockWidgetArea, m_dock_widget.data());
+    setDockNestingEnabled(true);
+
+    bool showLog = m_compat_info->LoadShowLogSetting();
+    ui->logDisplay->setVisible(showLog);
+    ui->toggleLogButton->setText(showLog ? tr("Hide Log") : tr("Show Log"));
+
+    disconnect(ui->toggleLogButton, nullptr, nullptr, nullptr);
+
+    connect(ui->toggleLogButton, &QPushButton::clicked, this, [this]() {
+        bool visible = ui->logDisplay->isVisible();
+        ui->logDisplay->setVisible(!visible);
+        ui->toggleLogButton->setText(visible ? tr("Show Log") : tr("Hide Log"));
+        m_compat_info->SaveShowLogSetting(!visible);
     });
 }
 
@@ -680,6 +631,12 @@ void MainWindow::CheckUpdateMain(bool checkSave) {
 }
 #endif
 
+void MainWindow::toggleWelcomeScreenOnLaunch(bool enabled) {
+    Config::setShowWelcomeDialog(enabled);
+    ui->welcomeAct->setChecked(enabled);
+    Config::save(Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "config.toml");
+}
+
 void MainWindow::onSetCustomBackground() {
     QString file =
         QFileDialog::getOpenFileName(this, tr("Select Background Image"), QDir::homePath(),
@@ -705,8 +662,8 @@ void MainWindow::CreateConnects() {
     connect(ui->refreshGameListAct, &QAction::triggered, this, &MainWindow::RefreshGameTable);
     connect(ui->refreshButton, &QPushButton::clicked, this, &MainWindow::RefreshGameTable);
     connect(ui->showGameListAct, &QAction::triggered, this, &MainWindow::ShowGameList);
-    connect(ui->toggleLabelsAct, &QAction::toggled, this, &MainWindow::toggleLabelsUnderIcons);
-    connect(ui->toggleColorFilterAct, &QAction::toggled, this, &MainWindow::toggleColorFilter);
+    connect(ui->toggleLabelsAct, &QAction::triggered, this, &MainWindow::toggleLabelsUnderIcons);
+    connect(ui->toggleColorFilterAct, &QAction::triggered, this, &MainWindow::toggleColorFilter);
     connect(ui->fullscreenButton, &QPushButton::clicked, this, &MainWindow::toggleFullscreen);
 
     connect(ui->sizeSlider, &QSlider::valueChanged, this, [this](int value) {
@@ -886,10 +843,50 @@ void MainWindow::CreateConnects() {
         auto versionDialog = new VersionDialog(m_compat_info, this);
         versionDialog->show();
     });
+    connect(ui->welcomeAct, &QAction::triggered, this, [this](bool checked) {
+        Config::setShowWelcomeDialog(checked);
+        Config::save(Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "config.toml");
+    });
+
+    connect(ui->pauseOnUnfocusAct, &QAction::triggered, this, [this](bool checked) {
+        Config::setPauseOnUnfocus(checked);
+        const auto config_dir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
+        Config::saveMainWindow(config_dir / "config.toml");
+    });
 
     connect(ui->versionButton, &QPushButton::clicked, this, [this]() {
         auto versionDialog = new VersionDialog(m_compat_info, this);
         versionDialog->show();
+    });
+    connect(ui->modManagerButton, &QPushButton::clicked, this, [this]() {
+        if (m_game_info->m_games.empty()) {
+            QMessageBox::warning(this, tr("Mod Manager"), tr("No game selected."));
+            return;
+        }
+        int selectedIndex = -1;
+        if (isTableList) {
+            QTableWidgetItem* current = m_game_list_frame->GetCurrentItem();
+            if (!current) {
+                QMessageBox::warning(this, tr("Mod Manager"), tr("No game selected."));
+                return;
+            }
+            selectedIndex = current->row();
+        } else {
+            if (!m_game_grid_frame->IsValidCellSelected()) {
+                QMessageBox::warning(this, tr("Mod Manager"), tr("No game selected."));
+                return;
+            }
+            selectedIndex = m_game_grid_frame->crtRow;
+        }
+        if (selectedIndex < 0 || selectedIndex >= m_game_info->m_games.size()) {
+            QMessageBox::warning(this, tr("Mod Manager"), tr("Invalid game index."));
+            return;
+        }
+        const GameInfo& game = m_game_info->m_games[selectedIndex];
+        QString gamePathQString;
+        Common::FS::PathToQString(gamePathQString, game.path);
+        auto dlg = new ModManagerDialog(gamePathQString, QString::fromStdString(game.serial), this);
+        dlg->show();
     });
 
     connect(ui->configureHotkeys, &QAction::triggered, this, [this]() {
@@ -916,6 +913,11 @@ void MainWindow::CreateConnects() {
             Config::setSliderPositionGrid(0);
             m_game_grid_frame->PopulateGameGrid(m_game_info->m_games, false);
         }
+    });
+
+    // handle resize like this for now, we deal with it when we add more docks
+    connect(this, &MainWindow::WindowResized, this, [&]() {
+        this->resizeDocks({m_dock_widget.data()}, {this->width()}, Qt::Orientation::Horizontal);
     });
 
     connect(ui->setIconSizeSmallAct, &QAction::triggered, this, [this]() {
@@ -964,50 +966,42 @@ void MainWindow::CreateConnects() {
     });
     // List
     connect(ui->setlistModeListAct, &QAction::triggered, m_dock_widget.data(), [this]() {
-        BackgroundMusicPlayer::getInstance().stopMusic();
-        m_dock_widget->setWidget(m_game_list_frame.data());
-        m_game_grid_frame->hide();
-        m_elf_viewer->hide();
-        m_game_list_frame->show();
-        m_game_list_frame->clearContents();
-        m_game_list_frame->PopulateGameList();
-        isTableList = true;
-        Config::setTableMode(0);
-        int slider_pos = Config::getSliderPosition();
         ui->sizeSlider->setEnabled(true);
-        ui->sizeSlider->setSliderPosition(slider_pos);
+        BackgroundMusicPlayer::getInstance().stopMusic();
+
+        const QList<int> sizes = ui->splitter->sizes();
+        m_compat_info->SaveDockWidgetSizes(sizes);
+
+        Config::setTableMode(0); // List
+        CreateDockWindows(false);
         ui->mw_searchbar->setText("");
         SetLastIconSizeBullet();
     });
+
     // Grid
     connect(ui->setlistModeGridAct, &QAction::triggered, m_dock_widget.data(), [this]() {
-        BackgroundMusicPlayer::getInstance().stopMusic();
-        m_dock_widget->setWidget(m_game_grid_frame.data());
-        m_game_grid_frame->show();
-        m_game_list_frame->hide();
-        m_elf_viewer->hide();
-        if (m_game_grid_frame->item(0, 0) == nullptr) {
-            m_game_grid_frame->clearContents();
-            m_game_grid_frame->PopulateGameGrid(m_game_info->m_games, false);
-        }
-        isTableList = false;
-        Config::setTableMode(1);
-        int slider_pos_grid = Config::getSliderPositionGrid();
         ui->sizeSlider->setEnabled(true);
-        ui->sizeSlider->setSliderPosition(slider_pos_grid);
+        BackgroundMusicPlayer::getInstance().stopMusic();
+
+        const QList<int> sizes = ui->splitter->sizes();
+        m_compat_info->SaveDockWidgetSizes(sizes);
+
+        Config::setTableMode(1); // Grid
+        CreateDockWindows(false);
         ui->mw_searchbar->setText("");
         SetLastIconSizeBullet();
     });
-    // Elf Viewer
+
+    // ELF Viewer
     connect(ui->setlistElfAct, &QAction::triggered, m_dock_widget.data(), [this]() {
+        ui->sizeSlider->setEnabled(false);
         BackgroundMusicPlayer::getInstance().stopMusic();
-        m_dock_widget->setWidget(m_elf_viewer.data());
-        m_game_grid_frame->hide();
-        m_game_list_frame->hide();
-        m_elf_viewer->show();
-        isTableList = false;
-        ui->sizeSlider->setDisabled(true);
-        Config::setTableMode(2);
+
+        const QList<int> sizes = ui->splitter->sizes();
+        m_compat_info->SaveDockWidgetSizes(sizes);
+
+        Config::setTableMode(2); // ELF Viewer
+        CreateDockWindows(false);
         SetLastIconSizeBullet();
     });
 
@@ -1131,7 +1125,6 @@ void MainWindow::CreateConnects() {
 
     // Package install.
     connect(ui->bootGameAct, &QAction::triggered, this, &MainWindow::BootGame);
-    connect(ui->gameInstallPathAct, &QAction::triggered, this, &MainWindow::Directories);
 
     // elf viewer
     connect(ui->addElfFolderAct, &QAction::triggered, m_elf_viewer.data(),
@@ -1343,6 +1336,15 @@ void MainWindow::CreateConnects() {
             m_game_list_frame->SetThemeColors(baseColor);
         }
     });
+
+    QObject::connect(m_ipc_client.get(), &IpcClient::LogEntrySent, this, &MainWindow::PrintLog);
+}
+
+void MainWindow::PrintLog(QString entry, QColor textColor) {
+    ui->logDisplay->setTextColor(textColor);
+    ui->logDisplay->append(entry);
+    QScrollBar* sb = ui->logDisplay->verticalScrollBar();
+    sb->setValue(sb->maximum());
 }
 
 void MainWindow::ToggleMute() {
@@ -1659,6 +1661,8 @@ void MainWindow::SaveWindowState() const {
     Config::setMainWindowHeight(this->height());
     Config::setMainWindowGeometry(this->geometry().x(), this->geometry().y(),
                                   this->geometry().width(), this->geometry().height());
+    QList<int> sizes = {ui->splitter->sizes()};
+    m_compat_info->SaveDockWidgetSizes(sizes);
 }
 
 void MainWindow::BootGame() {
@@ -1666,49 +1670,28 @@ void MainWindow::BootGame() {
     dialog.setFileMode(QFileDialog::ExistingFile);
     dialog.setNameFilter(tr("ELF files (*.bin *.elf *.oelf *.self)"));
 
-    if (!dialog.exec())
-        return;
+    if (dialog.exec()) {
+        QStringList fileNames = dialog.selectedFiles();
 
-    QStringList fileNames = dialog.selectedFiles();
-    if (fileNames.size() != 1) {
-        QMessageBox::critical(nullptr, tr("Game Boot"), tr("Only one file can be selected!"));
-        return;
+        if (fileNames.size() > 1) {
+            QMessageBox::critical(nullptr, tr("Game Boot"), tr("Only one file can be selected!"));
+            return;
+        }
+
+        QString gamePath = fileNames[0];
+        std::filesystem::path path = Common::FS::PathFromQString(gamePath);
+
+        if (!std::filesystem::exists(path)) {
+            QMessageBox::critical(nullptr, tr("Run Game"), tr("Eboot.bin file not found"));
+            return;
+        }
+
+        StartGameWithPath(gamePath);
+
+        lastGamePath = gamePath;
+        Config::setGameRunning(true);
+        UpdateToolbarButtons();
     }
-
-    QString gamePath = fileNames[0];
-    std::filesystem::path path = Common::FS::PathFromQString(gamePath);
-
-    if (!std::filesystem::exists(path)) {
-        QMessageBox::critical(nullptr, tr("Run Game"), tr("Eboot.bin file not found"));
-        return;
-    }
-
-    if (Config::getGameRunning()) {
-        QMessageBox::information(nullptr, tr("Game Boot"), tr("A game is already running."));
-        return;
-    }
-
-    if (!m_ipc_client) {
-        m_ipc_client = std::make_shared<IpcClient>(this);
-
-        m_ipc_client->gameClosedFunc = [this]() {
-            Config::setGameRunning(false);
-            UpdateToolbarButtons();
-        };
-    }
-
-    QFileInfo exeInfo(gamePath);
-    QString workDir = exeInfo.absolutePath();
-
-    // Use empty args if none are provided
-    QStringList args; // <-- declare empty args list
-    m_ipc_client->startGame(exeInfo, args, workDir);
-    m_ipc_client->setActiveController(GamepadSelect::GetSelectedGamepad());
-
-    lastGamePath = gamePath;
-    lastGameArgs = args;
-    Config::setGameRunning(true);
-    UpdateToolbarButtons();
 }
 
 #ifdef ENABLE_QT_GUI
@@ -1717,6 +1700,42 @@ QString MainWindow::getLastEbootPath() {
     return QString();
 }
 #endif
+
+void MainWindow::StartGameWithPath(const QString& gamePath) {
+    if (gamePath.isEmpty()) {
+        QMessageBox::warning(this, tr("Run Game"), tr("No game path provided."));
+        return;
+    }
+
+    AddRecentFiles(gamePath);
+
+    const auto path = Common::FS::PathFromQString(gamePath);
+    if (!std::filesystem::exists(path)) {
+        QMessageBox::critical(nullptr, tr("Run Game"), tr("Eboot.bin file not found"));
+        return;
+    }
+
+    emulatorProcess = new QProcess(this);
+    QString exePath = QCoreApplication::applicationFilePath();
+    emulatorProcess->setProcessChannelMode(QProcess::ForwardedChannels);
+
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert("SHADPS4_ENABLE_IPC", "true");
+    emulatorProcess->setProcessEnvironment(env);
+
+    emulatorProcess->start(exePath, QStringList() << gamePath);
+
+    lastGamePath = gamePath;
+    Config::setGameRunning(true);
+    UpdateToolbarButtons();
+
+    connect(emulatorProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this](int, QProcess::ExitStatus) {
+                Config::setGameRunning(false);
+                UpdateToolbarButtons();
+                emulatorProcess->deleteLater();
+            });
+}
 
 void MainWindow::Directories() {
     GameDirectoryDialog dlg;
@@ -1935,6 +1954,7 @@ void MainWindow::SetUiIcons(const QColor& baseColor, const QColor& hoverColor) {
     recolor(ui->keyboardButton, ":/images/keyboard_icon.png");
     recolor(ui->updaterButton, ":/images/update_icon.png");
     recolor(ui->versionButton, ":/images/utils_icon.png");
+    recolor(ui->modManagerButton, ":images/folder_icon.png");
     recolor(ui->configureHotkeysButton, ":/images/hotkeybutton.png");
 
     // --- Menus / Actions (no QPushButton, but recolor directly) ---
@@ -2053,7 +2073,6 @@ void MainWindow::CreateRecentGameActions() {
             QMessageBox::critical(nullptr, tr("Run Game"), QString(tr("Eboot.bin file not found")));
             return;
         }
-        StartEmulator(gamePath);
     });
 }
 
@@ -2111,35 +2130,6 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
     return QMainWindow::eventFilter(obj, event);
 }
 
-void MainWindow::StartEmulator(std::filesystem::path path, QStringList args) {
-    if (Config::getGameRunning()) {
-        return;
-    }
-
-    if (!m_ipc_client) {
-        m_ipc_client = std::make_shared<IpcClient>(this);
-
-        m_ipc_client->gameClosedFunc = [this]() {
-            Config::setGameRunning(false);
-            UpdateToolbarButtons();
-        };
-    }
-
-    QString gamePath;
-    Common::FS::PathToQString(gamePath, path);
-
-    QFileInfo exeInfo(gamePath);
-    QString workDir = exeInfo.absolutePath();
-    QString exeDir = QCoreApplication::applicationDirPath();
-    m_ipc_client->startGame(QFileInfo(QCoreApplication::applicationFilePath()), args, exeDir);
-    m_ipc_client->setActiveController(GamepadSelect::GetSelectedGamepad());
-
-    lastGamePath = gamePath;
-    lastGameArgs = args;
-    Config::setGameRunning(true);
-    UpdateToolbarButtons();
-}
-
 void MainWindow::StopGame() {
     if (!Config::getGameRunning())
         return;
@@ -2162,7 +2152,35 @@ void MainWindow::PauseGame() {
 }
 
 void MainWindow::RestartGame() {
-    if (!Config::getGameRunning())
+    if (!Config::getGameRunning()) {
+        QMessageBox::information(this, tr("Restart Game"), tr("No game is currently running."));
         return;
-    m_ipc_client->restartGame();
+    }
+
+    if (!m_ipc_client) {
+        QMessageBox::critical(this, tr("Restart Game"), tr("IPC client not initialized."));
+        return;
+    }
+
+    if (!Config::getRestartWithBaseGame()) {
+        m_ipc_client->restartGame();
+        return;
+    }
+
+    if (lastGamePath.isEmpty()) {
+        QMessageBox::critical(this, tr("Restart Game"), tr("Cannot restart: no stored game path."));
+        return;
+    }
+
+    LOG_INFO(IPC, "Restarting current game with base game dialog...");
+
+    Config::setGameRunning(false);
+    m_ipc_client->stopGame();
+
+    QTimer::singleShot(500, [this]() {
+        LOG_INFO(IPC, "Restart delay done, relaunching game...");
+
+        QStringList args = lastGameArgs;
+        StartGameWithArgs(args);
+    });
 }

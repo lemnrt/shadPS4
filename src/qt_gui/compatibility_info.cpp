@@ -4,7 +4,9 @@
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QProgressDialog>
+#include <QSettings>
 #include <QTimer>
+#include <QVariant>
 
 #include "common/path_util.h"
 #include "compatibility_info.h"
@@ -137,6 +139,26 @@ CompatibilityEntry CompatibilityInfoClass::GetCompatibilityInfo(const std::strin
                               0};
 }
 
+QList<int> CompatibilityInfoClass::LoadHiddenColumns() const {
+    QSettings settings("shadPS4", "Emulator");
+    QStringList strList = settings.value(QStringLiteral("MainWindow/hiddenColumns")).toStringList();
+    QList<int> hiddenCols;
+    for (const QString& s : strList) {
+        hiddenCols.append(s.toInt());
+    }
+    return hiddenCols;
+}
+
+void CompatibilityInfoClass::SaveHiddenColumns(const QList<int>& hiddenColumns) {
+    QSettings settings("shadPS4", "Emulator");
+    QStringList strList;
+    for (int col : hiddenColumns) {
+        strList.append(QString::number(col));
+    }
+    settings.setValue(QStringLiteral("MainWindow/hiddenColumns"), strList);
+    settings.sync();
+}
+
 bool CompatibilityInfoClass::LoadCompatibilityFile() {
     // Returns true if compatibility is loaded succescfully
     QFileInfo check_file(m_compatibility_filename);
@@ -247,6 +269,55 @@ void CompatibilityInfoClass::SaveFavorites(const QList<QString>& list) {
     QSettings settings("shadPS4", "Emulator");
     settings.setValue(QStringLiteral("Favorites/Keys"), list);
     settings.sync();
+}
+
+int CompatibilityInfoClass::LoadDisplayMode() const {
+    QSettings settings("shadPS4", "Emulator");
+    return settings.value(QStringLiteral("MainWindow/displayMode"), 0)
+        .toInt(); // 0 = list by default
+}
+
+void CompatibilityInfoClass::SaveDisplayMode(int mode) {
+    QSettings settings("shadPS4", "Emulator");
+    settings.setValue(QStringLiteral("MainWindow/displayMode"), mode);
+    settings.sync();
+}
+
+QList<int> CompatibilityInfoClass::LoadDockWidgetSizes() {
+    QSettings settings("shadPS4", "Emulator");
+    const QVariant var = settings.value(QStringLiteral("MainWindow/dockWidgetSizes"));
+    if (var.isValid()) {
+        return var.value<QList<int>>();
+    }
+    return {};
+}
+
+void CompatibilityInfoClass::SaveDockWidgetSizes(const QList<int>& sizes) {
+    QSettings settings("shadPS4", "Emulator");
+    settings.setValue(QStringLiteral("MainWindow/dockWidgetSizes"), QVariant::fromValue(sizes));
+    settings.sync();
+}
+
+bool CompatibilityInfoClass::LoadShowLogSetting() const {
+    QSettings settings("shadPS4", "Emulator");
+    return settings.value(QStringLiteral("MainWindow/showLog"), true).toBool();
+}
+
+void CompatibilityInfoClass::SaveShowLogSetting(bool show) {
+    QSettings settings("shadPS4", "Emulator");
+    settings.setValue(QStringLiteral("MainWindow/showLog"), show);
+    settings.sync();
+}
+
+void CompatibilityInfoClass::SetSkipWelcome(bool skip) {
+    QSettings settings("shadPS4", "Emulator");
+    settings.setValue("skip_welcome", skip);
+    settings.sync();
+}
+
+bool CompatibilityInfoClass::GetSkipWelcome() const {
+    QSettings settings("shadPS4", "Emulator");
+    return settings.value("skip_welcome", false).toBool();
 }
 
 const QString CompatibilityInfoClass::GetCompatStatusString(const CompatibilityStatus status) {

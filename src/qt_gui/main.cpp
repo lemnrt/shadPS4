@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <filesystem>
 #include <thread>
 #include "common/config.h"
 #include "common/logging/backend.h"
@@ -13,11 +14,15 @@
 #include "game_directory_dialog.h"
 #include "iostream"
 #include "main_window.h"
+#include "main_window_themes.h"
+#include "qt_gui/compatibility_info.h"
 #include "system_error"
 #include "unordered_map"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "welcome_dialog.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
+WindowThemes m_window_themes;
 
 #ifdef _WIN32
 #include <windows.h>
@@ -44,12 +49,14 @@ int main(int argc, char* argv[]) {
     // Load configurations and initialize Qt application
     const auto user_dir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
     Config::load(user_dir / "config.toml");
+    bool ignore_mods_path = false;
 
     bool has_command_line_argument = argc > 1;
     bool show_gui = false, has_game_argument = false;
     std::string game_path;
     std::vector<std::string> game_args{};
     std::optional<std::filesystem::path> game_folder;
+    std::optional<std::filesystem::path> mods_folder;
 
     bool waitForDebugger = false;
     std::optional<int> waitPid;
@@ -135,6 +142,30 @@ int main(int argc, char* argv[]) {
         {"--patch", [&](int& i) { arg_map["-p"](i); }},
         {"-i", [&](int&) { Core::FileSys::MntPoints::ignore_game_patches = true; }},
         {"--ignore-game-patch", [&](int& i) { arg_map["-i"](i); }},
+        {"-im",
+         [&](int&) {
+             ignore_mods_path = true;
+             Core::FileSys::MntPoints::enable_mods = false;
+         }},
+        {"--ignore-mods-path", [&](int& i) { arg_map["-im"](i); }},
+        {"-mf",
+         [&](int& i) {
+             if (i + 1 < argc) {
+                 std::filesystem::path dir(argv[++i]);
+                 if (!std::filesystem::exists(dir) || !std::filesystem::is_directory(dir)) {
+                     std::cerr << "Error: Invalid mods folder: " << dir << "\n";
+                     exit(1);
+                 }
+                 Core::FileSys::MntPoints::enable_mods = true;
+                 Core::FileSys::MntPoints::manual_mods_path = dir;
+                 mods_folder = dir;
+                 std::cout << "Mods folder set: " << dir << "\n";
+             } else {
+                 std::cerr << "Error: Missing argument for -mf/--mods-folder\n";
+                 exit(1);
+             }
+         }},
+        {"--mods-folder", [&](int& i) { arg_map["-mf"](i); }},
         {"-f",
          [&](int& i) {
              if (++i >= argc) {
@@ -206,12 +237,17 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         std::string cur_arg = argv[i];
         auto it = arg_map.find(cur_arg);
+
         if (it != arg_map.end()) {
-            it->second(i); // Call the associated lambda function
-        } else if (i == argc - 1 && !has_game_argument) {
-            // Assume the last argument is the game file if not specified via -g/--game
-            game_path = argv[i];
+            it->second(i);
+            continue;
+        }
+
+        if (!has_game_argument && !cur_arg.empty() && cur_arg[0] != '-') {
+            game_path = cur_arg;
             has_game_argument = true;
+            continue;
+
         } else if (std::string(argv[i]) == "--") {
             if (i + 1 == argc) {
                 std::cerr << "Warning: -- is set, but no game arguments are added!\n";
@@ -248,19 +284,132 @@ int main(int argc, char* argv[]) {
         has_command_line_argument = true;
     }
 
+    // Auto-detect or use manually specified MODS folder
+    if (has_game_argument) {
+        std::filesystem::path eboot_path(game_path);
+        if (!std::filesystem::exists(eboot_path)) {
+            bool found = false;
+            const int max_depth = 5;
+            for (const auto& dir : Config::getGameDirectories()) {
+                if (auto found_path = Common::FS::FindGameByID(dir, game_path, max_depth)) {
+                    eboot_path = *found_path;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                std::cerr << "Error: Game not found: " << game_path << "\n";
+                exit(1);
+            }
+        }
+
+        if (!mods_folder.has_value()) {
+            auto base_folder = eboot_path.parent_path();
+            auto parent = base_folder.parent_path();
+            auto game_folder_name = base_folder.filename().string();
+            auto auto_mods_folder = parent / (game_folder_name + "-MODS");
+            if (std::filesystem::exists(auto_mods_folder) &&
+                std::filesystem::is_directory(auto_mods_folder)) {
+                mods_folder = auto_mods_folder;
+                Core::FileSys::MntPoints::enable_mods = true;
+                std::cout << "Auto-detected mods folder: " << auto_mods_folder << "\n";
+            }
+        } else {
+            std::cout << "Using manually specified mods folder: " << mods_folder->string() << "\n";
+        }
+    }
+
+    WelcomeDialog welcomeDlg(&m_window_themes);
+    m_window_themes.ApplyThemeToDialog(&welcomeDlg);
+
+    if (!has_command_line_argument && Config::getShowWelcomeDialog()) {
+        welcomeDlg.exec();
+    }
+
     // If no game directories are set and no command line argument, prompt for it
     if (Config::getGameDirectoriesEnabled().empty() && !has_command_line_argument) {
         GameDirectoryDialog dlg;
         dlg.exec();
     }
 
-    // Ignore Qt logs
     qInstallMessageHandler(customMessageHandler);
 
-    // Initialize the main window
     MainWindow* m_main_window = new MainWindow(nullptr);
+
     if ((has_command_line_argument && show_gui) || !has_command_line_argument) {
         m_main_window->Init();
+
+        auto portable_dir = std::filesystem::current_path() / "user";
+        std::filesystem::path global_dir;
+
+#if _WIN32
+        TCHAR appdata[MAX_PATH] = {0};
+        SHGetFolderPath(NULL, CSIDL_APPDATA, NULL, 0, appdata);
+        global_dir = std::filesystem::path(appdata) / "shadPS4";
+#elif __APPLE__
+        global_dir =
+            std::filesystem::path(getenv("HOME")) / "Library" / "Application Support" / "shadPS4";
+#else
+        const char* xdg_data_home = getenv("XDG_DATA_HOME");
+        if (xdg_data_home && *xdg_data_home)
+            global_dir = std::filesystem::path(xdg_data_home) / "shadPS4";
+        else
+            global_dir = std::filesystem::path(getenv("HOME")) / ".local" / "share" / "shadPS4";
+#endif
+
+        if (welcomeDlg.m_userMadeChoice) {
+            if (welcomeDlg.m_portableChosen) {
+                if (std::filesystem::exists(global_dir)) {
+                    QMessageBox confirm;
+                    confirm.setIcon(QMessageBox::Warning);
+                    confirm.setWindowTitle(QObject::tr("Confirm Folder Deletion"));
+                    confirm.setText(QObject::tr("You selected *Portable Mode*.\n\nA Global "
+                                                "configuration folder already exists:\n%1\n\n"
+                                                "Do you want to delete it to avoid conflicts?")
+                                        .arg(QString::fromStdString(global_dir.string())));
+                    confirm.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+                    confirm.setDefaultButton(QMessageBox::No);
+
+                    if (confirm.exec() == QMessageBox::Yes) {
+                        try {
+                            std::filesystem::remove_all(global_dir);
+                            std::cout << "[Main] Global folder deleted after user confirmation "
+                                         "(Portable selected)\n";
+                        } catch (const std::exception& e) {
+                            std::cerr << "[Main] Failed to delete Global folder: " << e.what()
+                                      << '\n';
+                        }
+                    } else {
+                        std::cout << "[Main] User canceled Global folder deletion.\n";
+                    }
+                }
+            } else {
+                if (std::filesystem::exists(portable_dir)) {
+                    QMessageBox confirm;
+                    confirm.setIcon(QMessageBox::Warning);
+                    confirm.setWindowTitle(QObject::tr("Confirm Folder Deletion"));
+                    confirm.setText(QObject::tr("You selected *Global Mode*.\n\nA Portable user "
+                                                "folder already exists:\n%1\n\n"
+                                                "Do you want to delete it to avoid conflicts?")
+                                        .arg(QString::fromStdString(portable_dir.string())));
+                    confirm.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+                    confirm.setDefaultButton(QMessageBox::No);
+
+                    if (confirm.exec() == QMessageBox::Yes) {
+                        try {
+                            std::filesystem::remove_all(portable_dir);
+                            std::cout << "[Main] Portable folder deleted after user confirmation "
+                                         "(Global selected)\n";
+                        } catch (const std::exception& e) {
+                            std::cerr << "[Main] Failed to delete Portable folder: " << e.what()
+                                      << '\n';
+                        }
+                    } else {
+                        std::cout << "[Main] User canceled Portable folder deletion.\n";
+                    }
+                }
+            }
+        }
     }
 
     if (has_command_line_argument && !has_game_argument) {
@@ -273,12 +422,25 @@ int main(int argc, char* argv[]) {
     }
 
     const bool ipc_enabled = qEnvironmentVariableIsSet("SHADPS4_ENABLE_IPC");
-    const bool mods_enabled = qEnvironmentVariableIsSet("SHADPS4_ENABLE_MODS") &&
-                              qEnvironmentVariable("SHADPS4_ENABLE_MODS") == "1";
-    Core::FileSys::MntPoints::enable_mods = mods_enabled;
+    const bool mods_env_enabled = qEnvironmentVariableIsSet("SHADPS4_ENABLE_MODS") &&
+                                  qEnvironmentVariable("SHADPS4_ENABLE_MODS") == "1";
+
     const bool ignorePatches = qEnvironmentVariableIsSet("SHADPS4_BASE_GAME") &&
                                qEnvironmentVariable("SHADPS4_BASE_GAME") == "1";
-    Core::FileSys::MntPoints::ignore_game_patches = ignorePatches;
+
+    if (!mods_folder.has_value()) {
+        Core::FileSys::MntPoints::enable_mods = mods_env_enabled;
+    }
+
+    if (qEnvironmentVariableIsSet("SHADPS4_BASE_GAME")) {
+        Core::FileSys::MntPoints::ignore_game_patches = ignorePatches;
+    }
+
+    if (ignore_mods_path) {
+        Core::FileSys::MntPoints::enable_mods = false;
+        Core::FileSys::MntPoints::manual_mods_path.clear();
+    }
+
     if (ipc_enabled) {
         std::cout << ";#IPC_ENABLED\n";
         std::cout << ";ENABLE_MEMORY_PATCH\n";

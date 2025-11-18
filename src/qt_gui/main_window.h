@@ -35,8 +35,8 @@ public:
     ~MainWindow();
     std::string GetRunningGameSerial() const;
     bool Init();
-    void UserPath();
     void toggleColorFilter();
+    void StartGameWithPath(const QString& gamePath);
     void Directories();
     void ApplyLastUsedStyle();
     void StartGame();
@@ -50,6 +50,7 @@ public:
     bool isDetachedLaunch = false;
     void ToggleMute();
     std::string runningGameSerial = "";
+    bool m_showWelcomeOnLaunch = true;
 
     QString getLastEbootPath();
     QString lastGamePath;
@@ -76,8 +77,9 @@ private:
     void CreateActions();
     void toggleFullscreen();
     void CreateRecentGameActions();
-    void CreateDockWindows();
+    void CreateDockWindows(bool newDock);
     void LoadGameLists();
+    void PrintLog(QString entry, QColor textColor);
 
 #ifdef ENABLE_UPDATER
     void CheckUpdateMain(bool checkSave);
@@ -88,6 +90,7 @@ private:
     QPixmap RecolorPixmap(const QIcon& icon, const QSize& size, const QColor& color);
     void SetUiIcons(const QColor& baseColor, const QColor& hoverColor);
     void BootGame();
+    void toggleWelcomeScreenOnLaunch(bool enabled);
     void onSetCustomBackground();
     void onClearCustomBackground();
 
@@ -96,7 +99,6 @@ private:
     void PlayBackgroundMusic();
     QIcon RecolorIcon(const QIcon& icon, const QColor& baseColor, const QColor& hoverColor);
     QMap<QPushButton*, QIcon> m_originalIcons;
-    void StartEmulator(std::filesystem::path, QStringList args = {});
 
     bool isIconBlack = false;
     bool isTableList = true;

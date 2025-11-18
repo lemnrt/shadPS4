@@ -5,10 +5,17 @@
 
 #include <QMenuBar>
 #include <QPushButton>
+#include <QSplitter>
+#include <QTextEdit>
 #include <QToolBar>
 
 class Ui_MainWindow {
 public:
+    QPushButton* toggleLogButton = new QPushButton();
+
+    QSplitter* splitter;
+    QTextEdit* logDisplay;
+
     QAction* bootGameAct;
     QAction* addElfFolderAct;
     QAction* shadFolderAct;
@@ -36,6 +43,8 @@ public:
 #endif
     QAction* aboutAct;
     QAction* versionAct;
+    QAction* welcomeAct;
+    QAction* pauseOnUnfocusAct;
     QAction* configureAct;
     QAction* configureHotkeys;
     QAction* setThemeDark;
@@ -62,8 +71,8 @@ public:
     QPushButton* restartButton;
     QPushButton* updaterButton;
     QPushButton* versionButton;
+    QPushButton* modManagerButton;
     QPushButton* configureHotkeysButton;
-    QCheckBox* MuteBox;
     QComboBox* styleSelector = new QComboBox();
 
     QWidget* sizeSliderContainer;
@@ -122,6 +131,11 @@ public:
         toggleLabelsAct->setObjectName("toggleLabelsAct");
         toggleLabelsAct->setCheckable(true);
         toggleLabelsAct->setChecked(Config::getShowLabelsUnderIcons());
+
+        pauseOnUnfocusAct = new QAction(MainWindow);
+        pauseOnUnfocusAct->setObjectName("pauseOnUnfocusAct");
+        pauseOnUnfocusAct->setCheckable(true);
+        pauseOnUnfocusAct->setText("Pause Game When Unfocused");
 
         toggleColorFilterAct = new QAction(MainWindow);
         toggleColorFilterAct->setObjectName("toggleColorFilterAct");
@@ -183,6 +197,9 @@ public:
         versionAct = new QAction(MainWindow);
         versionAct->setObjectName("versionAct");
         versionAct->setIcon(QIcon(":images/play_icon.png"));
+        welcomeAct = new QAction(MainWindow);
+        welcomeAct->setObjectName("welcomeAct");
+        welcomeAct->setCheckable(true);
         configureAct = new QAction(MainWindow);
         configureAct->setObjectName("configureAct");
         configureAct->setIcon(QIcon(":images/settings_icon.png"));
@@ -283,14 +300,14 @@ public:
         versionButton->setFlat(true);
         versionButton->setIcon(QIcon(":images/utils_icon.png"));
         versionButton->setIconSize(QSize(40, 40));
+        modManagerButton = new QPushButton(centralWidget);
+        modManagerButton->setFlat(true);
+        modManagerButton->setIcon(QIcon(":images/folder_icon.png"));
+        modManagerButton->setIconSize(QSize(40, 40));
         configureHotkeysButton = new QPushButton(centralWidget);
         configureHotkeysButton->setFlat(true);
         configureHotkeysButton->setIcon(QIcon(":images/hotkeybutton.png"));
         configureHotkeysButton->setIconSize(QSize(50, 40));
-        MuteBox = new QCheckBox(centralWidget);
-        MuteBox->setObjectName("MuteBox");
-        MuteBox->setText("Mute");
-        MuteBox->setGeometry(QRect(500, 10, 60, 25));
         sizeSliderContainer = new QWidget(centralWidget);
         sizeSliderContainer->setObjectName("sizeSliderContainer");
         sizeSliderContainer->setGeometry(QRect(280, 10, 181, 31));
@@ -396,6 +413,7 @@ public:
         menuSettings->addAction(menuUtils->menuAction());
         menuSettings->addAction(clearCustomBackgroundAct);
         menuSettings->addAction(setCustomBackgroundAct);
+        menuSettings->addAction(pauseOnUnfocusAct);
         menuUtils->addAction(downloadCheatsPatchesAct);
         menuUtils->addAction(dumpGameListAct);
         menuUtils->addAction(trophyViewerAct);
@@ -405,6 +423,7 @@ public:
         menuHelp->addAction(aboutAct);
 
         menuHelp->addAction(versionAct);
+        menuHelp->addAction(welcomeAct);
 
         retranslateUi(MainWindow);
 
@@ -422,6 +441,8 @@ public:
 #endif
         aboutAct->setText(QCoreApplication::translate("MainWindow", "About shadPS4", nullptr));
         versionAct->setText(QCoreApplication::translate("MainWindow", "Version shadPS4", nullptr));
+        welcomeAct->setText(
+            QCoreApplication::translate("MainWindow", "Show Welcome On Launch", nullptr));
         configureAct->setText(QCoreApplication::translate("MainWindow", "Configure...", nullptr));
         configureHotkeys->setText(
             QCoreApplication::translate("MainWindow", "Customize Hotkeys", nullptr));
